@@ -4,7 +4,8 @@
   "private": true,
   "description": "Fat-loss tracker artifact: cut/break blocks, adaptive check-ins, fixed-day meal plan, Belgian grocery costs",
   "scripts": {
-    "test": "node --test tests/ && python3 -m unittest discover -s price_script -p 'test_*.py'"
+    "test": "node --test tests/ && python3 -m unittest discover -s price_script -p 'test_*.py'",
+    "smoke": "node tests/smoke.mjs"
   },
   "license": "UNLICENSED"
 }

@@ -1,0 +1,6 @@
+smoke-out/
+node_modules/
+__pycache__/
+*.pyc
+prices-*.json
+grocery-list-*.json

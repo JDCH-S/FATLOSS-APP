@@ -1,5 +1,7 @@
 # Cut Block Planner
 
+**Open the app:** https://claude.ai/artifact/SD82DKjNAqemdHhjnE8oQh (private to your account).
+
 A fat-loss tracker built as a claude.ai Artifact: short hard cut blocks with mandatory maintenance breaks,
 an adaptive weekly check-in that learns your real maintenance calories, one fixed daily meal plan, and a
 Friday grocery list priced at Colruyt, Delhaize and Carrefour Belgium. Metric units, EUR, English UI.
@@ -17,6 +19,17 @@ price_script/        fetch_prices.py (Apify → price-import JSON) + tests
 tests/               node:test suites for the logic modules
 docs/SPEC.md         module contract and algorithms
 ```
+
+## First use
+
+1. **Setup**: replace the example numbers (weight, height, age, body fat %, goal, steps, training days, session
+   lengths), choose 3–5 meals per day and the Saturday mode, set the program start (a Saturday), and mark the foods
+   you like and the ones you won't eat.
+2. Check **Starting calculations** and the **Program timeline** on the same tab.
+3. **Meal Plan** → *Generate plan*. Swap anything you don't want.
+4. Log morning weights in the week before the start; that week becomes the baseline for the first check-in.
+5. **Groceries** → *Export grocery list*, run the price script once, then *Import prices*. Until you do, every
+   price is a flagged estimate.
 
 ## The weekly routine
 

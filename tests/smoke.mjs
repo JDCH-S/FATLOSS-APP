@@ -72,6 +72,20 @@ await page.click('#cf-add');
 await page.waitForTimeout(100);
 check('custom food added', await page.locator('text=Test protein pudding').count() > 0);
 
+// ---- Program start: the week before the start is a baseline; then start two weeks ago so a check-in can be saved
+await page.click('#tab-checkin');
+await page.waitForTimeout(80);
+const todayUtc = new Date(Date.UTC(new Date().getFullYear(), new Date().getMonth(), new Date().getDate()));
+const startPre = new Date(todayUtc); startPre.setUTCDate(startPre.getUTCDate() + ((6 - startPre.getUTCDay() + 7) % 7 || 7));
+if (await page.locator('text=The program starts').count()) check('pre-start check-in tab shows the baseline note', await page.locator('text=baseline').count() > 0);
+await page.click('#tab-setup');
+const start = new Date(todayUtc); start.setUTCDate(start.getUTCDate() - ((start.getUTCDay() + 1) % 7) - 7);
+await page.fill('#s-start', iso(start));
+await page.press('#s-start', 'Enter');
+await page.waitForTimeout(120);
+check('program start typed with the keyboard is applied', (await page.inputValue('#s-start')) === iso(start), await page.inputValue('#s-start'));
+check('header shows Cut 1 after the start moved', await page.locator('#status-strip >> text=Cut 1').count() > 0);
+
 // ---- Meal plan
 await tab('plan');
 await page.click('#plan-generate');
@@ -100,13 +114,15 @@ for (let i = 13; i >= 0; i--) {
   await page.dispatchEvent('#log-date', 'change');
   await page.waitForTimeout(30);
   await page.fill('#log-weight', String((86 - (13 - i) * 0.1).toFixed(1)));
-  await page.fill('#log-kcal', String(2000 + (i % 3) * 50));
-  await page.fill('#log-protein', '180');
-  await page.fill('#log-steps', '8500');
+  await page.fill('#log-kcal', String(2013 + (i % 3) * 47));
+  await page.fill('#log-protein', '181.5');
+  await page.fill('#log-steps', String(8537 + i));
   await page.press('#log-steps', 'Enter');
   await page.waitForTimeout(40);
 }
-check('log rows saved', await page.locator('text=Saved').count() > 0);
+check('log rows saved (non-round numbers)', await page.locator('text=Saved').count() > 0);
+await page.waitForTimeout(900); // saves are debounced
+check('14 days stored', await page.evaluate(() => { try { return Object.keys(JSON.parse(localStorage.getItem('fatloss-app-v1')).logs).length; } catch (e) { return -1; } }) >= 14);
 await page.screenshot({ path: join(out, 'log-filled.png'), fullPage: true });
 
 // ---- Check-in

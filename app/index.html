@@ -22,6 +22,7 @@
     --warn-soft: #fbefd8;
     --bad: #ad2f2c;
     --bad-soft: #fae3e2;
+    --bad-ink: #ffffff;
     --chart-dot: #8e99a5;
     --chart-avg: #2b58a6;
     --chart-target: #22744a;
@@ -55,6 +56,7 @@
       --warn-soft: #2d2413;
       --bad: #ef8a84;
       --bad-soft: #321b1a;
+      --bad-ink: #1a0b0a;
       --chart-dot: #6f7a86;
       --chart-avg: #8aaae6;
       --chart-target: #6cc794;
@@ -80,6 +82,7 @@
     --warn-soft: #2d2413;
     --bad: #ef8a84;
     --bad-soft: #321b1a;
+    --bad-ink: #1a0b0a;
     --chart-dot: #6f7a86;
     --chart-avg: #8aaae6;
     --chart-target: #6cc794;
@@ -193,7 +196,7 @@
   }
   .seg button:last-child { border-right: 0; }
   .seg button[aria-pressed="true"] { background: var(--accent); color: var(--accent-ink); }
-  .seg.tri button[aria-pressed="true"][data-v="exclude"] { background: var(--bad); color: #fff; }
+  .seg.tri button[aria-pressed="true"][data-v="exclude"] { background: var(--bad); color: var(--bad-ink); }
   .days { display: inline-flex; gap: 4px; flex-wrap: wrap; }
   .days button {
     appearance: none; font: inherit; font-size: var(--fs-xs); width: 40px; padding: 5px 0; border-radius: var(--radius);
@@ -243,9 +246,19 @@
   .timeline { display: grid; gap: 4px; }
   .timeline .t { display: grid; grid-template-columns: 170px 1fr auto; gap: 10px; align-items: center; font-size: var(--fs-sm); padding: 5px 8px; border-radius: var(--radius); }
   .timeline .t.now { background: var(--accent-soft); }
+  .show-sm { display: none; }
+  .how { flex-basis: 100%; font-size: var(--fs-sm); }
+  .how summary { color: var(--accent); font-size: var(--fs-xs); }
+  .how ul { margin-top: 4px; }
   @media (max-width: 560px) {
     .timeline .t { grid-template-columns: 1fr; gap: 2px; }
     .status-strip { gap: 4px 10px; }
+    .tabs { flex-wrap: wrap; }
+    .tab { padding: 6px 9px 7px; }
+    .hide-sm { display: none; }
+    span.show-sm, td .sub.show-sm { display: block; }
+    th, td { padding: 6px 6px; }
+    .btn.ghost { padding-inline: 4px; }
   }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 </style>

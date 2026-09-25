@@ -42,6 +42,18 @@ async function tab(name) {
 // ---- Setup
 await tab('setup');
 check('starting calculations table', await page.locator('text=BMR (Mifflin-St Jeor, men)').count() > 0);
+// First edit on example data removes the example banner (the page shifts); a slow click right after must still land.
+await page.fill('#s-age', '36');
+const thu = await page.locator('#day-liftDays-4').boundingBox();
+await page.mouse.move(thu.x + thu.width / 2, thu.y + thu.height / 2);
+await page.mouse.down();
+await page.waitForTimeout(90);
+await page.mouse.up();
+await page.waitForTimeout(120);
+check('slow click right after the first edit lands', (await page.getAttribute('#day-liftDays-4', 'aria-pressed')) === 'true');
+await page.click('#day-liftDays-4');
+await page.fill('#s-age', '35');
+await page.press('#s-age', 'Tab');
 const bmrBefore = await page.locator('td:has-text("BMR (Mifflin-St Jeor, men)") + td').textContent();
 await page.fill('#s-weight', '90');
 await page.press('#s-weight', 'Tab');
@@ -80,8 +92,11 @@ const startPre = new Date(todayUtc); startPre.setUTCDate(startPre.getUTCDate() +
 if (await page.locator('text=The program starts').count()) check('pre-start check-in tab shows the baseline note', await page.locator('text=baseline').count() > 0);
 await page.click('#tab-setup');
 const start = new Date(todayUtc); start.setUTCDate(start.getUTCDate() - ((start.getUTCDay() + 1) % 7) - 7);
-await page.fill('#s-start', iso(start));
-await page.press('#s-start', 'Enter');
+// Type the date digit by digit like a keyboard user (US-locale segments: month, day, year).
+await page.click('#s-start');
+await page.keyboard.type(iso(start).slice(5, 7) + iso(start).slice(8, 10) + iso(start).slice(0, 4), { delay: 40 });
+await page.press('#s-start', 'Tab');
+await page.waitForTimeout(150);
 await page.waitForTimeout(120);
 check('program start typed with the keyboard is applied', (await page.inputValue('#s-start')) === iso(start), await page.inputValue('#s-start'));
 check('header shows Cut 1 after the start moved', await page.locator('#status-strip >> text=Cut 1').count() > 0);
@@ -102,6 +117,7 @@ if (await swapSel.count()) {
     await swapSel.selectOption({ index: 1 });
     await page.waitForTimeout(150);
     check('swap works', await page.locator('text=Swapped in').count() > 0);
+    check('swap dropdown returns to "Swap…" after swapping', (await page.locator('select[data-swap]').first().inputValue()) === '');
   }
 }
 

@@ -100,14 +100,30 @@
   }
   function recordPlanWeek(c) {
     if (!state.plan || !state.plan.base) return false;
-    const p = planForWeek(c, c.weekNow);
-    const snap = compactPlan(p.plan);
     const hist = state.plan.history || {};
-    if (JSON.stringify(hist[c.weekNow]) === JSON.stringify(snap)) return false;
-    hist[c.weekNow] = snap;
+    // Recorded once, as the week starts; later swaps show up as changes against it.
+    if (hist[c.weekNow]) return false;
+    hist[c.weekNow] = compactPlan(planForWeek(c, c.weekNow).plan);
     Object.keys(hist).sort().reverse().slice(10).forEach(function (k) { delete hist[k]; });
     state.plan.history = hist;
     return true;
+  }
+
+  // Plan items whose food is excluded, no longer liked or deleted (left in only when nothing can replace them).
+  function disallowedInPlan(c) {
+    if (!state.plan || !state.plan.base) return [];
+    const out = [];
+    state.plan.base.meals.forEach(function (m) {
+      m.items.forEach(function (it) { if (c.liked.indexOf(it.foodId) < 0 && out.indexOf(it.foodId) < 0) out.push(it.foodId); });
+    });
+    return out;
+  }
+  function disallowedBanner(c) {
+    const bad = disallowedInPlan(c);
+    if (!bad.length) return '';
+    const names = bad.map(function (id) { return (c.foods[id] || {}).name || id; });
+    return '<div class="banner warn">' + esc(names.join(', ')) + (bad.length > 1 ? ' are' : ' is') + ' no longer allowed but nothing liked can replace ' +
+      (bad.length > 1 ? 'them' : 'it') + ' in its meal. ' + (bad.length > 1 ? 'They are' : 'It is') + ' left off the grocery list. Like another food of that kind, or regenerate the plan.</div>';
   }
 
   function planForWeek(c, week) {
@@ -171,9 +187,18 @@
     S.save(section, state);
     scheduleRender();
   }
+  // A render while a pointer button is down can move the pressed control (a banner appears or goes away) so the
+  // click never lands; such renders wait for the pointer to come up (the click is dispatched first).
+  let pointerDown = false, renderPending = false;
   function scheduleRender() {
+    if (pointerDown) { renderPending = true; return; }
     if (renderTimer) return;
     renderTimer = setTimeout(function () { renderTimer = null; render(); }, 0);
+  }
+  function onPointerDown() { pointerDown = true; }
+  function onPointerUp() {
+    pointerDown = false;
+    if (renderPending) { renderPending = false; setTimeout(scheduleRender, 0); }
   }
 
   // Patches the live DOM to match freshly rendered HTML instead of replacing it, so elements keep their identity:
@@ -197,12 +222,12 @@
     }
     if (from.nodeName === 'TEXTAREA') { if (!focused && from.value !== to.value) from.value = to.value; return; }
     morphChildren(from, to);
-    if (wantSelect !== null && !focused && from.value !== wantSelect) from.value = wantSelect;
+    if (wantSelect !== null && from.value !== wantSelect) from.value = wantSelect;
   }
   function selectedValue(sel) {
     const opts = sel.querySelectorAll('option');
-    for (let i = 0; i < opts.length; i++) if (opts[i].hasAttribute('selected')) return opts[i].getAttribute('value') || '';
-    return opts.length ? opts[0].getAttribute('value') || '' : '';
+    for (let i = 0; i < opts.length; i++) if (opts[i].hasAttribute('selected')) return opts[i].value;
+    return opts.length ? opts[0].value : '';
   }
   // Children are matched by id when they have one, otherwise by position and tag.
   function morphChildren(from, to) {
@@ -240,7 +265,7 @@
     let html = '';
     try {
       const c = ctx();
-      if (ui.logDraft && ui.logDraft.followToday && ui.logDraft.date !== c.today) resetDraft(c.today);
+      if (ui.logDraft && ui.logDraft.followToday && ui.logDraft.date !== c.today && !draftDirty()) resetDraft(c.today);
       renderHeader(c);
       html = (ui.loadError ? '<div class="banner ' + ui.loadError.kind + '" role="alert">' + esc(ui.loadError.text) + '</div>' : '') +
         (tab === 'setup' ? renderSetup(c)
@@ -257,8 +282,13 @@
     doc.querySelectorAll('.tab').forEach(function (b) { b.setAttribute('aria-selected', String(b.dataset.tab === tab)); });
     view.setAttribute('aria-labelledby', 'tab-' + tab);
     patch(view, html);
-    // Focus normally survives the patch; if its element was replaced, put it back by id.
-    if (fid && doc.activeElement !== ae) { const el = doc.getElementById(fid); if (el) { try { el.focus({ preventScroll: true }); } catch (e) { el.focus(); } } }
+    // Focus normally survives the patch. If its element is gone (a confirm bar, the Generate button), move it to
+    // the control the action named, else the same id, else the view, so keyboard users never fall back to <body>.
+    if (ae && ae !== doc.body && !doc.contains(ae)) {
+      const next = (ui.focusAfter && doc.getElementById(ui.focusAfter)) || (fid && doc.getElementById(fid)) || view;
+      try { next.focus({ preventScroll: true }); } catch (e) { next.focus(); }
+    }
+    ui.focusAfter = null;
   }
   function safeRender(fn) { try { return fn(); } catch (e) { return ''; } }
 
@@ -291,7 +321,9 @@
       if (ph.blockEnd) parts.push('<span>Block ends <b>' + esc(E.formatDate(ph.blockEnd)) + '</b>, dinner</span>');
     }
     if (sum.projection && isNum(sum.projection.weightKg)) {
-      parts.push('<span>Projected at block end <b>' + fmt(sum.projection.weightKg, 1) + ' kg</b></span>');
+      parts.push(ph.type === 'final'
+        ? '<span>Holding at about <b>' + fmt(sum.projection.weightKg, 1) + ' kg</b> (no block end)</span>'
+        : '<span>Projected at block end <b>' + fmt(sum.projection.weightKg, 1) + ' kg</b></span>');
     }
     parts.push('<span>' + (ph.type === 'pre' ? 'Week-1 targets' : 'Today') + ' <b>' + fmt(T.kcal) + ' kcal</b> · P ' + fmt(T.protein) +
       ' · C ' + fmt(T.carbs) + ' · F ' + fmt(T.fat) + ' g</span>');
@@ -398,6 +430,7 @@
     const def = E.dailyDeficit(val(rate), s.weightKg);
     const w1 = E.targetsForWeek(state, s.programStart);
     const fat22 = 0.22 * w1.kcal / 9;
+    const w1kg = isNum(w1.weightUsed) ? w1.weightUsed : s.weightKg;
     const rows = [
       ['BMR (Mifflin-St Jeor, men)', fmt(val(bmr)) + ' kcal', formulaText(bmr)],
       ['Exercise (average per day)', fmt(val(ex), 0) + ' kcal', formulaText(ex)],
@@ -410,8 +443,8 @@
       ['Weekly loss rate (cut)', fmt(val(rate) * 100, 2) + ' % / week', (rate && rate.reason) || ''],
       ['Daily deficit (cut)', fmt(val(def)) + ' kcal', formulaText(def)],
       ['Week-1 calorie target', fmt(w1.kcal) + ' kcal', (w1.explanation || []).join(' · ')],
-      ['Week-1 fat', fmt(w1.fat) + ' g', 'Fat = max(22 % × ' + fmt(w1.kcal) + ' kcal / 9, 0.6 g × ' + fmt(s.weightKg, 1) + ' kg) = max(' +
-        fmt(fat22, 1) + ', ' + fmt(val(ff), 1) + ') = ' + fmt(w1.fat, 1) + ' g'],
+      ['Week-1 fat', fmt(w1.fat) + ' g', 'Fat = max(22 % × ' + fmt(w1.kcal) + ' kcal / 9, 0.6 g × ' + fmt(w1kg, 1) + ' kg) = max(' +
+        fmt(fat22, 1) + ', ' + fmt(0.6 * w1kg, 1) + ') = ' + fmt(w1.fat, 1) + ' g'],
       ['Week-1 carbs', fmt(w1.carbs) + ' g', 'Carbs = (' + fmt(w1.kcal) + ' − 4 × ' + fmt(w1.protein, 1) + ' − 9 × ' + fmt(w1.fat, 1) + ') / 4 = ' + fmt(w1.carbs, 1) + ' g'],
       ['Calorie floor', fmt(val(bmr)) + ' kcal', 'Targets never go below BMR' + (w1.bmrFloorApplied ? ' (applied to week 1)' : '') + '. Protein is never reduced.']
     ];
@@ -445,10 +478,19 @@
       const ph = E.phaseForWeek(start, w, grw);
       const last = blocks[blocks.length - 1];
       if (last && last.label === ph.label) continue;
-      if (ph.type === 'final') { blocks.push({ label: ph.label, type: 'final', start: w }); break; }
+      if (ph.type === 'final') {
+        // The goal was reached (a check-in saw it): the cut it happened in stops the week before.
+        if (last && last.end && last.end >= w) {
+          last.end = E.addDays(w, -1);
+          last.length = Math.max(1, Math.round(E.daysBetween(last.start, w) / 7));
+          last.goalEnd = 'actual';
+        }
+        blocks.push({ label: ph.label, type: 'final', start: w });
+        break;
+      }
       const b = { label: ph.label, type: ph.type, start: ph.blockStart, end: ph.blockEnd, length: ph.blockLength };
       blocks.push(b);
-      if (goalDate && ph.blockEnd && goalDate <= ph.blockEnd) {
+      if (!grw && goalDate && ph.blockEnd && goalDate <= ph.blockEnd) {
         // The check-in that sees the goal switches the next diet week to final maintenance, so this block stops there.
         const fw = E.nextSaturdayOnOrAfter(E.addDays(goalDate, 1));
         if (fw <= ph.blockEnd) { b.end = E.addDays(fw, -1); b.length = Math.round(E.daysBetween(b.start, fw) / 7); b.goalEnd = true; }
@@ -464,7 +506,8 @@
       const to = b.goalEnd && isNum(goal) ? goal : b.end ? kgAt[E.addDays(b.end, 1)] : null;
       const dates = b.type === 'final'
         ? 'from ' + E.formatDate(b.start) + (b.projected ? ' (projected)' : '')
-        : E.formatDate(b.start) + ' – ' + E.formatDate(b.end) + ' · ' + b.length + ' wk' + (b.goalEnd ? ' (goal reached, projected)' : '');
+        : E.formatDate(b.start) + ' – ' + E.formatDate(b.end) + ' · ' + b.length + ' wk' +
+          (b.goalEnd === 'actual' ? ' (goal reached)' : b.goalEnd ? ' (goal reached, projected)' : '');
       const kg = b.type === 'final' ? (isNum(goal) ? 'goal ' + fmt(goal, 1) + ' kg' : '')
         : isNum(from) && isNum(to) ? fmt(from, 1) + ' → ' + fmt(to, 1) + ' kg' : '';
       return '<div class="t' + (now ? ' now' : '') + '"><span><b>' + esc(b.label) + '</b>' + (now ? ' <span class="chip accent">now</span>' : '') +
@@ -497,7 +540,7 @@
         return '<tr><td>' + esc(f.name) + (f.custom ? ' <span class="chip">custom</span>' : '') + '<span class="sub">' + esc(f.nameNl || '') +
           (f.unit ? ' · 1 ' + esc(f.unit.name) + ' = ' + fmt(f.unit.grams) + ' g' : '') + '</span>' +
           '<span class="sub show-sm">' + fmt(f.kcal) + ' kcal · P ' + fmt(f.protein, 1) + ' · C ' + fmt(f.carbs, 1) + ' · F ' + fmt(f.fat, 1) + ' · fibre ' + fmt(f.fibre, 1) + '</span>' + del +
-          confirmBar('deleteCustom', f.id, 'Delete this custom food? It is removed from your liked foods and the plan.', 'Delete') +
+          confirmBar('deleteCustom', f.id, 'Delete this custom food? It is removed from your liked foods and replaced in the meal plan.', 'Delete') +
           '</td><td class="n hide-sm">' + fmt(f.kcal) + '</td><td class="n hide-sm">' + fmt(f.protein, 1) + '</td><td class="n hide-sm">' + fmt(f.carbs, 1) +
           '</td><td class="n hide-sm">' + fmt(f.fat, 1) + '</td><td class="n hide-sm">' + fmt(f.fibre, 1) + '</td><td>' + tri + '</td></tr>';
       }).join('');
@@ -509,7 +552,7 @@
 
     const cf = ui.custom;
     const customForm = '<details class="panel" id="cf-details"' + (ui.open['cf-details'] || ui.customErr ? ' open' : '') + '><summary><b>Add a custom food</b> <span class="muted small">(macros per 100 g)</span></summary>' +
-      '<div class="stack" style="margin-top:10px">' + (ui.customErr ? '<div class="banner bad" role="alert">' + esc(ui.customErr) + '</div>' : '') +
+      '<div class="stack" style="margin-top:10px">' +
       '<div class="grid">' +
       customField('cf-name', 'Name', 'name', 'text') +
       '<label class="field" for="cf-category">Category<select id="cf-category" data-custom="category">' + CAT_ORDER.map(function (k) {
@@ -522,7 +565,8 @@
       [['', 'Automatic (by category)'], ['both', 'Any meal'], ['breakfast', 'Breakfast and snacks'], ['main', 'Lunch and dinner']].map(function (o) {
         return '<option value="' + o[0] + '"' + ((cf.meals || '') === o[0] ? ' selected' : '') + '>' + o[1] + '</option>';
       }).join('') + '</select></label>' +
-      '</div><div class="row"><button type="button" class="btn primary" id="cf-add" data-action="add-custom">Add food</button>' +
+      '</div>' + (ui.customErr ? '<div class="banner bad" role="alert" id="cf-err-bottom">' + esc(ui.customErr) + '</div>' : '') +
+      '<div class="row"><button type="button" class="btn primary" id="cf-add" data-action="add-custom">Add food</button>' +
       '<span class="muted small">New custom foods are marked as liked.</span></div></div></details>';
 
     const aside = '<span class="muted small">' + likedCount + ' liked · ' + (s.excludedFoods || []).length + ' excluded</span>';
@@ -542,12 +586,12 @@
       confirmBar('importBackup', '', 'Replace all current data with the backup' + (ui.pendingBackup && ui.pendingBackup.name ? ' “' + ui.pendingBackup.name + '”' : '') + '?', 'Replace') +
       '<div class="row"><button type="button" class="btn" id="backup-export" data-action="backup-export">Export all data</button>' +
       '<button type="button" class="btn" id="backup-import" data-action="pick-file" data-target="file-backup">Import backup…</button></div>' +
-      exportBox() + '</div>';
+      exportBox('backup') + '</div>';
     return block('Backup', body);
   }
 
-  function exportBox() {
-    if (!ui.exportText) return '';
+  function exportBox(where) {
+    if (!ui.exportText || ui.exportText.where !== where) return '';
     return '<div class="stack"><p class="note">Downloads are not available in this view. Copy the JSON below and save it as <b>' + esc(ui.exportText.name) + '</b>.</p>' +
       '<textarea id="export-text" readonly>' + esc(ui.exportText.text) + '</textarea>' +
       '<div class="row"><button type="button" class="btn" id="copy-export" data-action="copy-export">Copy</button>' +
@@ -557,6 +601,11 @@
   // =====================================================================================
   // DAILY LOG
   // =====================================================================================
+  // Added to save messages when the account can't be reached, so "Saved" never overstates where the data is.
+  function savedWhere() {
+    return ui.readOnly ? ' Saved on this device only: your account could not be reached. It syncs after a successful reload.' : '';
+  }
+
   function renderLog(c) {
     const date = (ui.logDraft && ui.logDraft.date) || c.today;
     if (!ui.logDraft || ui.logDraft.date !== date) resetDraft(date);
@@ -588,7 +637,7 @@
     const weeks = [];
     for (let i = 0; i < ui.weeksShown; i++) weeks.push(E.addDays(c.weekNow, -7 * i));
     const rows = weeks.map(function (ws) { return weekRows(c, ws); }).join('');
-    const table = '<div class="tscroll"><table><thead><tr><th>Day</th><th class="n">Weight</th><th class="n hide-sm">7-day avg</th><th class="n">kcal</th>' +
+    const table = '<div class="tscroll"><table class="log-table"><thead><tr><th>Day</th><th class="n">Weight</th><th class="n hide-sm">7-day avg</th><th class="n">kcal</th>' +
       '<th class="n">Protein</th><th class="n">Steps</th><th class="hide-sm"></th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
       '<div class="row"><button type="button" class="btn" id="log-more" data-action="log-more">Show an older week</button>' +
       (ui.weeksShown > 2 ? '<button type="button" class="btn ghost" id="log-less" data-action="log-less">Show fewer</button>' : '') + '</div>';
@@ -602,9 +651,31 @@
       esc(v == null ? '' : v) + '"></label>';
   }
   // The quick-entry form follows today unless the user picked another day; after saving a past day it returns to today.
+  const LOG_KEYS = ['weight', 'kcal', 'protein', 'steps'];
   function resetDraft(date) {
     const e = (state.logs || {})[date] || {};
-    ui.logDraft = { date: date, weight: e.weight, kcal: e.kcal, protein: e.protein, steps: e.steps, followToday: date === todayIso() };
+    const orig = {};
+    LOG_KEYS.forEach(function (k) { orig[k] = isNum(e[k]) ? e[k] : null; });
+    ui.logDraft = Object.assign({ date: date, followToday: date === todayIso(), orig: orig }, orig);
+  }
+  function draftValue(k) { const v = parseNum(ui.logDraft[k]); return Number.isNaN(v) ? NaN : v; }
+  // True when the user typed something that is not saved yet.
+  function draftDirty() {
+    return !!ui.logDraft && LOG_KEYS.some(function (k) { return draftValue(k) !== ui.logDraft.orig[k]; });
+  }
+  // Another tab or device changed the logs: untouched fields of the open form take the new stored values.
+  function refreshDraft() {
+    if (!ui.logDraft) return;
+    const e = (state.logs || {})[ui.logDraft.date] || {};
+    LOG_KEYS.forEach(function (k) {
+      const now = isNum(e[k]) ? e[k] : null;
+      if (draftValue(k) === ui.logDraft.orig[k] && now !== ui.logDraft.orig[k]) {
+        ui.logDraft[k] = now;
+        const el = doc.getElementById('log-' + k);
+        if (el) el.value = now == null ? '' : now;
+      }
+      ui.logDraft.orig[k] = now;
+    });
   }
   function showDraftValues() {
     ['weight', 'kcal', 'protein', 'steps'].forEach(function (k) {
@@ -671,19 +742,32 @@
     const dateEl = doc.getElementById('log-date');
     const date = dateEl && dateEl.value;
     if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) { ui.logMsg = { kind: 'bad', text: 'Pick a date first.' }; return scheduleRender(); }
-    const entry = { weight: read('log-weight'), kcal: read('log-kcal'), protein: read('log-protein'), steps: read('log-steps') };
+    if (ui.logDraft && date !== ui.logDraft.date) {
+      // A new date typed and confirmed with Enter: show that day instead of saving the other day's numbers onto it.
+      applyLogDate(date);
+      ui.logMsg = { kind: 'info', text: 'Showing ' + E.formatDate(date) + '. Enter the numbers and save.' };
+      return scheduleRender();
+    }
+    const typed = { weight: read('log-weight'), kcal: read('log-kcal'), protein: read('log-protein'), steps: read('log-steps') };
+    // Fields the user left as they were keep the latest stored value (another tab or device may have filled them).
+    const orig = (ui.logDraft && ui.logDraft.orig) || {};
+    const stored = (state.logs || {})[date] || {};
+    const entry = {};
+    LOG_KEYS.forEach(function (k) {
+      entry[k] = typed[k] === (orig[k] == null ? null : orig[k]) && !Number.isNaN(typed[k]) ? (isNum(stored[k]) ? stored[k] : null) : typed[k];
+    });
     const bad = Object.keys(entry).filter(function (k) { return Number.isNaN(entry[k]) || (isNum(entry[k]) && entry[k] < 0); });
     if (bad.length) { ui.logMsg = { kind: 'bad', text: 'Check ' + bad.join(', ') + ': use numbers only.' }; return scheduleRender(); }
     if (isNum(entry.weight) && (entry.weight < 30 || entry.weight > 300)) { ui.logMsg = { kind: 'bad', text: 'Weight must be between 30 and 300 kg.' }; return scheduleRender(); }
     if (isNum(entry.kcal) && entry.kcal > 10000) { ui.logMsg = { kind: 'bad', text: 'Calories look too high (over 10,000). Check the number.' }; return scheduleRender(); }
     state.logs = state.logs || {};
-    const empty = ['weight', 'kcal', 'protein', 'steps'].every(function (k) { return entry[k] == null; });
+    const empty = LOG_KEYS.every(function (k) { return entry[k] == null; });
     if (empty) {
-      if (state.logs[date]) { delete state.logs[date]; ui.logMsg = { kind: 'good', text: 'Cleared ' + E.formatDate(date) + '.' }; }
+      if (state.logs[date]) { delete state.logs[date]; ui.logMsg = { kind: 'good', text: 'Cleared ' + E.formatDate(date) + '.' + savedWhere() }; }
       else { ui.logMsg = { kind: 'warn', text: 'Nothing to save: all fields are empty.' }; return scheduleRender(); }
     } else {
       state.logs[date] = entry;
-      ui.logMsg = { kind: 'good', text: 'Saved ' + E.formatDate(date) + '.' };
+      ui.logMsg = { kind: ui.readOnly ? 'warn' : 'good', text: 'Saved ' + E.formatDate(date) + '.' + savedWhere() };
     }
     const today = todayIso();
     if (date !== today) ui.logMsg.text += ' The form is back on today.';
@@ -739,7 +823,8 @@
     for (let w = newest; w >= first && options.length < 60; w = E.addDays(w, -7)) options.push(w);
     if (options.indexOf(week) < 0) options.unshift(week);
     const picker = '<label class="field" for="ci-week" style="max-width:340px">Week (Saturday – Friday)<select id="ci-week">' + options.map(function (w) {
-      return '<option value="' + w + '"' + (w === week ? ' selected' : '') + '>' + esc(E.formatRange(w)) + (w < ps ? ' · baseline' : '') + ((state.checkins || {})[w] ? ' · saved' : '') + '</option>';
+      return '<option value="' + w + '"' + (w === week ? ' selected' : '') + '>' + esc(E.formatRange(w)) + (w === E.addDays(ps, -7) ? ' · baseline' : w < ps ? ' · before the program' : '') +
+        ((state.checkins || {})[w] ? ' · saved' : '') + '</option>';
     }).join('') + '</select></label>';
 
     const cur = rec.cur || {}, prev = rec.prev || {};
@@ -815,9 +900,12 @@
       savedLine + (changedSinceSave ? '<span class="muted small">Your logs changed since this check-in was saved.</span>' : '') + '</div>' + msg(ui.checkinMsg);
 
     if (baseline) {
+      const isBaseline = week === E.addDays(ps, -7);
       h.push(block('Check-in', '<div class="row">' + picker + '</div>' + avgTable +
-        '<p class="note">This is the week before the program starts. Its averages are the baseline that week 1’s check-in compares against; ' +
-        'week-1 targets come from Setup, so nothing here changes your targets.</p>'));
+        '<p class="note">' + (isBaseline
+          ? 'This is the week before the program starts. Its averages are the baseline that week 1’s check-in compares against; week-1 targets come from Setup, so nothing here changes your targets.'
+          : 'This week is before the program (which starts ' + esc(E.formatDate(ps)) + '); the baseline will be ' + esc(E.formatRange(E.addDays(ps, -7))) +
+            '. Nothing logged this early feeds your targets.') + '</p>'));
       h.push(block('Weight trend', weightChart(c)));
       h.push(block('History', historyTable()));
       return h.join('');
@@ -957,9 +1045,6 @@
     const chk = M.checkPlan(plan, c.foods, macros(T));
     const warnings = [];
     if (plan.mealsPerDay !== state.setup.mealsPerDay) warnings.push('Your plan has ' + plan.mealsPerDay + ' meals but Setup says ' + state.setup.mealsPerDay + '. Regenerate to apply it.');
-    const bad = [];
-    plan.meals.forEach(function (m) { m.items.forEach(function (it) { if (c.liked.indexOf(it.foodId) < 0) bad.push(c.foods[it.foodId] ? c.foods[it.foodId].name : it.foodId); }); });
-    if (bad.length) warnings.push('The plan contains foods that are no longer liked or are excluded: ' + unique(bad).join(', ') + '. Swap them or regenerate.');
     (plan.warnings || []).forEach(function (w) { warnings.push(w); });
 
     // summary
@@ -968,7 +1053,8 @@
       sumRow('Calories', T.kcal, d.kcal, ' kcal', Math.abs(chk.kcalDiffPct) <= 5,
         signed(chk.kcalDiffPct, Math.max(1, M.limitDecimals(chk.kcalDiffPct, (chk.kcalDiffPct < 0 ? -1 : 1) * 5))) + ' % (limit ±5 %)') +
       sumRow('Protein', T.protein, d.protein, ' g', Math.abs(chk.proteinDiffG) <= 10,
-        signed(chk.proteinDiffG, M.limitDecimals(chk.proteinDiffG, (chk.proteinDiffG < 0 ? -1 : 1) * 10)) + ' g (limit ±10 g)') +
+        signed(chk.proteinDiffG, M.limitDecimals(chk.proteinDiffG, (chk.proteinDiffG < 0 ? -1 : 1) * 10)) + ' g (limit ±10 g)',
+        M.limitDecimals(chk.proteinDiffG, (chk.proteinDiffG < 0 ? -1 : 1) * 10)) +
       sumRow('Carbs', T.carbs, d.carbs, ' g', null, '') +
       sumRow('Fat', T.fat, d.fat, ' g', null, '') +
       sumRow('Fibre', 25, d.fibre, ' g', d.fibre >= 25, 'at least 25 g', M.limitDecimals(d.fibre, 25)) +
@@ -979,7 +1065,7 @@
       '<span class="muted small">Generated for ' + esc(E.formatRange(state.plan.weekGenerated || week)) + '. Weekly target changes only rescale grams (carbs first, then fat).</span></div>' +
       confirmBar('regen', '', 'Replace the current meals, including your swaps, with a newly generated plan?', 'Regenerate');
 
-    h.push(block('Day totals · ' + E.formatRange(week), (warnings.length ? '<div class="banner warn"><ul class="note" style="margin:0;padding-left:18px">' +
+    h.push(block('Day totals · ' + E.formatRange(week), disallowedBanner(c) + (warnings.length ? '<div class="banner warn"><ul class="note" style="margin:0;padding-left:18px">' +
       warnings.map(function (w) { return '<li>' + esc(w) + '</li>'; }).join('') + '</ul></div>' : '') + summ + actions + msg(ui.planMsg)));
 
     // meals
@@ -1040,8 +1126,13 @@
     const head = '<p class="note">Targets ' + fmt(ta.kcal) + ' → ' + fmt(tb.kcal) + ' kcal (' + signed(tb.kcal - ta.kcal, 0) + '), carbs ' + fmt(ta.carbs) + ' → ' + fmt(tb.carbs) +
       ' g, fat ' + fmt(ta.fat) + ' → ' + fmt(tb.fat) + ' g, protein ' + fmt(ta.protein) + ' → ' + fmt(tb.protein) + ' g.' +
       (estimated ? ' Last week’s plan was not recorded, so it is estimated from the current meals at last week’s targets.' : '') + '</p>';
+    const trimmed = tb.protein === ta.protein && b.meals.some(function (m) {
+      const pm = a.meals.filter(function (x) { return x.key === m.key; })[0];
+      return pm && m.items.some(function (it, ii) { const o = pm.items[ii]; return o && o.foodId === it.foodId && it.role === 'protein' && it.grams < o.grams; });
+    });
+    const why = trimmed && tb.carbs > ta.carbs ? '<p class="note">Protein portions are a little smaller although the protein target is the same: the extra potatoes, oats and bread carry protein too, so the day stays within 10 g of its protein target.</p>' : '';
     if (!lines.length) return head + '<p class="note">No changes: same foods, same amounts.</p>';
-    return head + '<ul class="note">' + lines.map(function (l) { return '<li>' + esc(l) + '</li>'; }).join('') + '</ul>';
+    return head + '<ul class="note">' + lines.map(function (l) { return '<li>' + esc(l) + '</li>'; }).join('') + '</ul>' + why;
   }
 
   // =====================================================================================
@@ -1066,7 +1157,7 @@
     const priceLine = '<span class="muted small">Prices last imported: <b>' + (imp.lastImport ? esc(dateLong(imp.lastImport)) + (imp.lastImportFile ? ' (' + esc(imp.lastImportFile) + ')' : '') : 'never') + '</b></span>';
     const tools = '<div class="row"><button type="button" class="btn" id="groc-export" data-action="groc-export">Export grocery list</button>' +
       '<button type="button" class="btn" id="groc-import" data-action="pick-file" data-target="file-prices">Import prices…</button>' +
-      priceLine + '</div>' + exportBox() + msg(ui.importMsg) + importErrors() + unmatchedPanel(c);
+      priceLine + '</div>' + exportBox('groceries') + msg(ui.importMsg) + importErrors() + unmatchedPanel(c);
 
     if (!state.plan || !state.plan.base) {
       h.push(block('Groceries', '<div class="panel stack"><p class="note">Generate a meal plan first; the grocery list is built from it.</p>' + tools + '</div>'));
@@ -1075,7 +1166,7 @@
     }
     const p = planForWeek(c, week);
     const T = p.targets;
-    const qty = G.weeklyQuantities(p.plan, state.setup.saturdayMode);
+    const qty = G.weeklyQuantities(p.plan, state.setup.saturdayMode).filter(function (q) { return c.liked.indexOf(q.foodId) >= 0; });
     const br = G.storeBreakdown(qty, state.products || [], c.today);
     const provisional = week > c.weekNow && T.source !== 'checkin' && !(state.checkins || {})[E.addDays(week, -7)] &&
       E.programWeekIndex(state.setup.programStart, week) > 0;
@@ -1131,7 +1222,7 @@
       '</tbody><tfoot><tr><td colspan="' + (showStore ? 9 : 8) + '">Total' + (ui.grocView === 'cheapest' ? ' (best store per item)' : ' at ' + esc(ui.grocView)) + '</td><td class="n">' + eur(total) +
       '</td><td colspan="2"></td></tr></tfoot></table></div>';
 
-    h.push(block('Groceries', intro + tools + totals + missingTxt));
+    h.push(block('Groceries', disallowedBanner(c) + intro + tools + totals + missingTxt));
     h.push(block('Shopping list', '<div class="row">' + viewSeg + '</div>' + table +
       '<p class="note">Prices marked “run price script” are older than 7 days, have no date, or are seeded estimates. Export the list, run <span class="mono">fetch_prices.py</span>, then import its output.</p>'));
     h.push(renderProductTable(c));
@@ -1151,9 +1242,9 @@
     const opts = c.list.slice().sort(function (a, b) { return a.name.localeCompare(b.name); })
       .map(function (f) { return '<option value="' + esc(f.id) + '">' + esc(f.name) + '</option>'; }).join('');
     const rows = un.map(function (r, i) {
-      const sel = ui.mapSel[i] || '';
+      const sel = ui.mapSel[unmatchedKey(r)] || '';
       return '<tr><td>' + esc(r.store) + '</td><td>' + esc(r.product) + '</td><td class="mono">' + esc(r.ean || '–') + '</td><td class="n">' + fmt(r.pack_size_g) + ' g</td><td class="n">' + eur(r.price_eur) +
-        '</td><td><select id="map-' + i + '" data-map="' + i + '" aria-label="Food for ' + esc(r.product) + '"><option value="">Choose food…</option>' +
+        '</td><td><select id="map-' + i + '" data-map="' + esc(unmatchedKey(r)) + '" aria-label="Food for ' + esc(r.product) + '"><option value="">Choose food…</option>' +
         opts.replace('value="' + esc(sel) + '"', 'value="' + esc(sel) + '" selected') + '</select></td><td><button type="button" class="btn" id="map-add-' + i + '" data-action="map-unmatched" data-idx="' + i +
         '">Add to product table</button></td></tr>';
     }).join('');
@@ -1161,6 +1252,8 @@
       '<div class="tscroll"><table><thead><tr><th>Store</th><th>Product</th><th>EAN</th><th class="n">Pack</th><th class="n">Price</th><th>Food</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
       '<div class="row"><button type="button" class="btn ghost" id="unmatched-clear" data-action="unmatched-clear">Dismiss all unmatched rows</button></div></div>';
   }
+
+  function unmatchedKey(r) { return [r.store, r.ean || '', G.normalizeName(r.product)].join('|'); }
 
   function renderProductTable(c) {
     const rows = (state.products || []).filter(function (r) { return ui.prodStore === 'all' || r.store === ui.prodStore; })
@@ -1188,7 +1281,7 @@
         (ui.confirm && ui.confirm.kind === 'deleteProduct' && ui.confirm.key === r.id ? confirmBar('deleteProduct', r.id, 'Delete this row?', 'Delete') : '') + '</td></tr>';
     }).join('');
     const np = ui.newProd;
-    const addForm = '<details class="panel"><summary><b>Add a product row</b></summary><div class="stack" style="margin-top:10px">' +
+    const addForm = '<details class="panel" id="np-details"' + (ui.open['np-details'] ? ' open' : '') + '><summary><b>Add a product row</b></summary><div class="stack" style="margin-top:10px">' +
       '<div class="grid">' +
       '<label class="field" for="np-store">Store<select id="np-store" data-newprod="store">' + STORES.map(function (s) { return '<option' + ((np.store || STORES[0]) === s ? ' selected' : '') + '>' + s + '</option>'; }).join('') + '</select></label>' +
       '<label class="field" for="np-food">Food<select id="np-food" data-newprod="foodId"><option value="">Choose…</option>' + foodOpts(np.foodId) + '</select></label>' +
@@ -1218,11 +1311,21 @@
       if (f === 'mealsPerDay' && state.plan && state.plan.base && state.plan.base.mealsPerDay !== v) {
         const c = ctx();
         const T = E.targetsForWeek(state, c.weekNow);
-        const plan = M.generatePlan({ foods: c.foods, liked: c.liked, excluded: c.excluded, targets: macros(T), mealsPerDay: v });
-        state.plan = { base: plan, weekGenerated: c.weekNow, history: state.plan.history || {} };
+        const kept = Object.assign({}, state.plan.byMeals || {});
+        kept[state.plan.base.mealsPerDay] = state.plan.base;
+        let base = kept[v];
+        const usable = base && base.meals.every(function (m) { return m.items.every(function (it) { return c.liked.indexOf(it.foodId) >= 0; }); });
+        if (usable) {
+          base = M.rescalePlan(base, c.foods, macros(T)).plan;
+          ui.setupNote = 'Meals per day is now ' + v + ': your earlier ' + v + '-meal plan is back, including its swaps.';
+        } else {
+          base = M.generatePlan({ foods: c.foods, liked: c.liked, excluded: c.excluded, targets: macros(T), mealsPerDay: v });
+          ui.setupNote = 'Meals per day is now ' + v + ': the meal plan was regenerated with ' + v + ' meals. Your ' + state.plan.base.mealsPerDay +
+            '-meal plan is kept and comes back if you switch back.';
+        }
+        state.plan = { base: base, weekGenerated: c.weekNow, history: state.plan.history || {}, byMeals: kept };
         recordPlanWeek(ctx());
         S.save('plan', state);
-        ui.setupNote = 'Meals per day is now ' + v + ': the meal plan was regenerated with ' + v + ' meals (swaps were reset).';
       }
       commit('setup');
     },
@@ -1262,12 +1365,12 @@
       state.checkins = state.checkins || {};
       state.checkins[week] = rec;
       const later = Object.keys(state.checkins).filter(function (k) { return k > week; });
-      ui.checkinMsg = { kind: 'good', text: 'Check-in saved. New targets apply from ' + E.formatDate(E.addDays(week, 7)) + ' dinner; the meal plan and grocery list use them now.' +
-        (later.length ? ' Later check-ins were computed from the old values: open and save them again in order.' : '') };
+      ui.checkinMsg = { kind: ui.readOnly ? 'warn' : 'good', text: 'Check-in saved. New targets apply from ' + E.formatDate(E.addDays(week, 7)) + ' dinner; the meal plan and grocery list use them now.' +
+        (later.length ? ' Later check-ins were computed from the old values: open and save them again in order.' : '') + savedWhere() };
       commit('checkins');
     },
     'plan-week': function (el) { ui.planWeek = el.dataset.value; scheduleRender(); },
-    'plan-generate': generatePlan,
+    'plan-generate': function () { ui.focusAfter = 'plan-regenerate'; generatePlan(); },
     'plan-regenerate': function () { ui.confirm = { kind: 'regen' }; scheduleRender(); },
     'groc-week': function (el) { ui.grocWeek = el.dataset.value; scheduleRender(); },
     'groc-view': function (el) { ui.grocView = el.dataset.value; scheduleRender(); },
@@ -1275,12 +1378,12 @@
     'pick-file': function (el) { const f = doc.getElementById(el.dataset.target); if (f) { f.value = ''; f.click(); } },
     'map-unmatched': function (el) {
       const i = Number(el.dataset.idx);
-      const foodId = ui.mapSel[i];
-      if (!foodId) { ui.importMsg = { kind: 'bad', text: 'Choose a food for that row first.' }; return scheduleRender(); }
       const un = state.priceMeta.unmatched;
+      const foodId = un[i] && ui.mapSel[unmatchedKey(un[i])];
+      if (!foodId) { ui.importMsg = { kind: 'bad', text: 'Choose a food for that row first.' }; return scheduleRender(); }
+      delete ui.mapSel[unmatchedKey(un[i])];
       state.products = G.mapImportRow(state.products, un[i], foodId);
       un.splice(i, 1);
-      ui.mapSel = {};
       ui.importMsg = { kind: 'good', text: 'Added to the product table.' };
       S.save('products', state);
       commit('priceMeta');
@@ -1322,6 +1425,7 @@
     'confirm-no': function () { ui.confirm = null; scheduleRender(); },
     'confirm-yes': function () {
       const cf = ui.confirm; ui.confirm = null;
+      ui.focusAfter = cf && cf.kind === 'deleteLog' ? 'log-date' : cf && cf.kind === 'regen' ? 'plan-regenerate' : null;
       if (!cf) return;
       if (cf.kind === 'deleteLog') { delete state.logs[cf.key]; ui.logMsg = { kind: 'good', text: 'Deleted ' + E.formatDate(cf.key) + '.' }; resetDraft((ui.logDraft && ui.logDraft.date) || todayIso()); commit('logs'); }
       else if (cf.kind === 'regen') { generatePlan(); }
@@ -1329,14 +1433,23 @@
       else if (cf.kind === 'deleteProduct') { state.products = state.products.filter(function (r) { return r.id !== cf.key; }); commit('products'); }
       else if (cf.kind === 'deleteCustom') {
         const s = state.setup;
-        s.likedFoods = (s.likedFoods || []).filter(function (x) { return x !== cf.key; });
-        s.excludedFoods = (s.excludedFoods || []).filter(function (x) { return x !== cf.key; });
+        const likedBefore = (s.likedFoods || []).slice(), excludedBefore = (s.excludedFoods || []).slice();
+        s.likedFoods = likedBefore.filter(function (x) { return x !== cf.key; });
+        s.excludedFoods = excludedBefore.filter(function (x) { return x !== cf.key; });
         // Replace it in the plan while its macros are still known, then drop it.
-        ui.setupNote = cleanPlan() || null;
+        const note = cleanPlan() || '';
+        if (state.plan && state.plan.base && JSON.stringify(state.plan.base).indexOf('"' + cf.key + '"') >= 0) {
+          s.likedFoods = likedBefore; s.excludedFoods = excludedBefore;
+          ui.setupErr = 'This custom food cannot be deleted yet: nothing you like can replace it in the meal plan. Like another food of the same kind, or regenerate the plan, then delete it.';
+          return scheduleRender();
+        }
+        ui.setupNote = note || null;
         s.customFoods = (s.customFoods || []).filter(function (f) { return f.id !== cf.key; });
         commit('setup');
       } else if (cf.kind === 'importBackup' && ui.pendingBackup) {
         state = ui.pendingBackup.state; ui.pendingBackup = null;
+        ui.setupNote = null; ui.setupErr = null; ui.planMsg = null; ui.importMsg = null; ui.checkinMsg = null; ui.logMsg = null;
+        resetDraft(todayIso());
         ui.backupMsg = { kind: 'good', text: 'Backup restored.' };
         S.saveAll(state).then(function (ok) {
           if (!ok) { ui.backupMsg = { kind: 'bad', text: 'The backup is loaded on this page but could not be saved. Check the save status at the top and try again.' }; scheduleRender(); }
@@ -1366,7 +1479,12 @@
     else if (['protein', 'carbs', 'fat'].some(function (k) { return !isNum(nums[k]) || nums[k] < 0; })) err = 'Enter protein, carbs and fat per 100 g (0 or more).';
     else if (nums.protein + nums.carbs + nums.fat > 100) err = 'Protein + carbs + fat cannot exceed 100 g per 100 g.';
     else if (isNum(unitG) && unitG <= 0) err = 'Unit weight must be above 0 g, or leave it empty.';
-    if (err) { ui.customErr = err; return scheduleRender(); }
+    if (err) {
+      ui.customErr = err;
+      scheduleRender();
+      setTimeout(function () { const e = doc.getElementById('cf-err-bottom'); if (e) { try { e.scrollIntoView({ block: 'nearest' }); } catch (x) { /* old browsers */ } } }, 30);
+      return;
+    }
     const s = state.setup;
     const slug = name.toLowerCase().normalize('NFD').replace(/[̀-ͯ]/g, '').replace(/[^a-z0-9]+/g, '_').replace(/^_|_$/g, '').slice(0, 24) || 'food';
     let id = 'custom_' + slug, n = 2;
@@ -1391,7 +1509,7 @@
     const T = E.targetsForWeek(state, week);
     if (!c.liked.length) { ui.planMsg = { kind: 'bad', text: 'Mark some foods as liked in Setup first.' }; return scheduleRender(); }
     const plan = M.generatePlan({ foods: c.foods, liked: c.liked, excluded: c.excluded, targets: macros(T), mealsPerDay: state.setup.mealsPerDay });
-    state.plan = { base: plan, weekGenerated: week, history: (state.plan && state.plan.history) || {} };
+    state.plan = Object.assign({}, state.plan || {}, { base: plan, weekGenerated: week, history: (state.plan && state.plan.history) || {} });
     recordPlanWeek(c);
     ui.planMsg = { kind: 'good', text: 'Plan generated.' };
     commit('plan');
@@ -1401,10 +1519,12 @@
     const newId = el.value;
     if (!newId) return;
     const c = ctx();
-    const week = ui.planWeek === 'next' ? E.addDays(c.weekNow, 7) : c.weekNow;
+    // The fixed day is shared by every week; a swap re-solves that meal on this week's plan, so the other meals of
+    // the week you are eating now stay exactly as they are (next week's view is a rescale of it).
+    const week = c.weekNow;
     const p = planForWeek(c, week);
     const next = M.swapFood(p.plan, c.foods, c.liked, c.excluded, el.dataset.meal, Number(el.dataset.idx), newId);
-    state.plan = { base: next, weekGenerated: week, history: state.plan.history || {} };
+    state.plan = Object.assign({}, state.plan, { base: next, weekGenerated: week });
     recordPlanWeek(c);
     ui.planMsg = { kind: 'good', text: 'Swapped in ' + c.foods[newId].name + '. Only that meal was re-solved.' };
     commit('plan');
@@ -1420,7 +1540,7 @@
       const m = { kind: 'warn', text: 'Download cancelled.' };
       if (where === 'backup') ui.backupMsg = m; else ui.importMsg = m;
     } else {
-      ui.exportText = { name: name, text: text };
+      ui.exportText = { name: name, text: text, where: where };
     }
     scheduleRender();
   }
@@ -1430,7 +1550,7 @@
     if (!state.plan || !state.plan.base) { ui.importMsg = { kind: 'bad', text: 'Generate a meal plan first.' }; return scheduleRender(); }
     const week = groceryWeek(c);
     const p = planForWeek(c, week);
-    const qty = G.weeklyQuantities(p.plan, state.setup.saturdayMode);
+    const qty = G.weeklyQuantities(p.plan, state.setup.saturdayMode).filter(function (q) { return c.liked.indexOf(q.foodId) >= 0; });
     const data = G.buildExport(qty, state.products || [], c.foods, { start: week, end: E.addDays(week, 6) }, c.today);
     offerFile('grocery-list-' + week + '.json', JSON.stringify(data, null, 2), 'groceries');
   }
@@ -1487,10 +1607,13 @@
     ui.setupErr = null; ui.setupNote = null;
     if (v === null) {
       if (key === 'bodyFatPct') { state.setup.bodyFatPct = null; return commit('setup'); }
-      ui.setupErr = r[2] + ' is required.'; return scheduleRender();
+      ui.setupErr = r[2] + ' is required.';
+      el.value = isNum(state.setup[key]) ? state.setup[key] : '';
+      return scheduleRender();
     }
     if (Number.isNaN(v) || v < r[0] || v > r[1]) {
       ui.setupErr = r[2] + ' must be between ' + r[0] + ' and ' + r[1] + (r[3] ? ' ' + r[3] : '') + '. The previous value is kept.';
+      el.value = isNum(state.setup[key]) ? state.setup[key] : '';
       return scheduleRender();
     }
     state.setup[key] = v;
@@ -1540,9 +1663,8 @@
   function onChange(e) {
     const t = e.target;
     if (t.dataset.bind) return bindSetup(t);
-    // Typing a date fires change per segment; apply it when the field is left (or on Enter) instead.
-    if (t.id === 's-start') { if (doc.activeElement !== t) setProgramStart(t.value); return; }
-    if (t.id === 'log-date') { if (doc.activeElement !== t) applyLogDate(t.value); return; }
+    // Typing a date fires change per segment; dates apply when the field is really left, or on Enter.
+    if (t.id === 's-start' || t.id === 'log-date') return;
     if (t.id === 'ci-week') { ui.checkinWeek = t.value; ui.checkinMsg = null; return scheduleRender(); }
     if (t.dataset.swap) return doSwap(t);
     if (t.dataset.prod) return editProduct(t);
@@ -1561,14 +1683,23 @@
   }
   function onFocusOut(e) {
     const t = e.target;
-    if (t.id === 's-start' && t.value !== state.setup.programStart) setProgramStart(t.value);
-    if (t.id === 'log-date') applyLogDate(t.value);
+    if (t.id !== 's-start' && t.id !== 'log-date') return;
+    // Moving between the segments of the same date field is not leaving it.
+    setTimeout(function () {
+      if (doc.activeElement === t) return;
+      if (t.id === 's-start') applyProgramStart(t);
+      else applyLogDate(t.value);
+    }, 0);
   }
   function onKeydown(e) {
     const t = e.target;
-    if (e.key !== 'Enter' || (t.id !== 's-start' && t.id !== 'log-date')) return;
-    e.preventDefault();
-    if (t.id === 's-start') { if (t.value !== state.setup.programStart) setProgramStart(t.value); } else applyLogDate(t.value);
+    if (e.key !== 'Enter') return;
+    // Enter in the start date applies it; Enter in the log date saves the day like the other log fields.
+    if (t.id === 's-start') { e.preventDefault(); applyProgramStart(t); }
+  }
+  function applyProgramStart(input) {
+    if (input.value !== state.setup.programStart) setProgramStart(input.value);
+    input.value = state.setup.programStart;
   }
   function onSubmit(e) {
     if (e.target.id === 'log-form') { e.preventDefault(); saveLog(); }
@@ -1576,13 +1707,14 @@
   function onToggle(e) {
     if (e.target.id === 'prod-details') ui.prodOpen = e.target.open;
     else if (e.target.id) ui.open[e.target.id] = e.target.open;
+    if (e.target.id === 'cf-details' && !e.target.open) ui.customErr = null;
   }
 
   function setTab(name) {
     if (['setup', 'log', 'checkin', 'plan', 'groceries'].indexOf(name) < 0) name = 'setup';
     tab = name;
     ui.confirm = null;
-    if (name === 'log') { resetDraft(todayIso()); ui.logMsg = null; }
+    if (name === 'log' && !draftDirty()) { resetDraft(todayIso()); ui.logMsg = null; }
     if (state && !ui.readOnly) ensureProgramSnapshot();
     if ((name === 'plan' || name === 'groceries') && state && recordPlanWeek(ctx())) S.save('plan', state);
     try { root.history.replaceState(null, '', '#' + name); } catch (e) { /* sandboxed */ }
@@ -1596,6 +1728,9 @@
     doc.addEventListener('input', onInput);
     doc.addEventListener('submit', onSubmit);
     doc.addEventListener('focusout', onFocusOut);
+    doc.addEventListener('pointerdown', onPointerDown, true);
+    doc.addEventListener('pointerup', onPointerUp, true);
+    doc.addEventListener('pointercancel', onPointerUp, true);
     doc.addEventListener('keydown', onKeydown);
     doc.addEventListener('toggle', onToggle, true);
     const hash = (root.location.hash || '').replace('#', '');
@@ -1614,7 +1749,17 @@
     if (state.setup.programStart && E.dayOfWeek(state.setup.programStart) !== 6) state.setup.programStart = E.nextSaturdayOnOrAfter(state.setup.programStart);
     if (!state.products || !state.products.length) state.products = clone(SEED);
     // Another tab or device changed something: the store has already merged it into `state`.
-    if (S.onRemote) S.onRemote(function () { scheduleRender(); });
+    if (S.onRemote) S.onRemote(function (section) { if (section === 'logs') refreshDraft(); scheduleRender(); });
+    // Past midnight the form moves on to the new day (unless the user is typing), and the header follows.
+    let lastDay = todayIso();
+    setInterval(function () {
+      const t = todayIso();
+      if (t === lastDay) return;
+      lastDay = t;
+      if (ui.logDraft && ui.logDraft.followToday && !draftDirty()) resetDraft(t);
+      if (!ui.readOnly) ensureProgramSnapshot();
+      scheduleRender();
+    }, 30000);
     if (res.readOnly) setSaveState('error', 'Not saving: ' + res.error); else { setSaveState('saved'); ensureProgramSnapshot(); }
     setTab(tab);
   }

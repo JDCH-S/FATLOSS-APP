@@ -151,6 +151,7 @@
 
   /* layout */
   main { display: grid; gap: 28px; padding-top: 20px; }
+  main:focus { outline: none; }
   section.block { display: grid; gap: 12px; }
   .block-head { display: flex; align-items: baseline; justify-content: space-between; gap: 12px; flex-wrap: wrap; }
   .panel { background: var(--surface); border: 1px solid var(--line); border-radius: var(--radius); padding: 14px 16px; }
@@ -246,10 +247,10 @@
   .timeline { display: grid; gap: 4px; }
   .timeline .t { display: grid; grid-template-columns: 170px 1fr auto; gap: 10px; align-items: center; font-size: var(--fs-sm); padding: 5px 8px; border-radius: var(--radius); }
   .timeline .t.now { background: var(--accent-soft); }
-  .show-sm { display: none; }
+  .show-sm, td .sub.show-sm { display: none; }
   .how { flex-basis: 100%; font-size: var(--fs-sm); }
   .how summary { color: var(--accent); font-size: var(--fs-xs); }
-  .how ul { margin-top: 4px; }
+  .how ul { margin-top: 4px; max-height: 40vh; overflow-y: auto; }
   @media (max-width: 560px) {
     .timeline .t { grid-template-columns: 1fr; gap: 2px; }
     .status-strip { gap: 4px 10px; }
@@ -259,6 +260,7 @@
     span.show-sm, td .sub.show-sm { display: block; }
     th, td { padding: 6px 6px; }
     .btn.ghost { padding-inline: 4px; }
+    .log-table th, .log-table td { padding: 5px 4px; font-size: var(--fs-xs); }
   }
   @media (prefers-reduced-motion: reduce) { * { transition: none !important; animation: none !important; } }
 </style>
@@ -281,7 +283,7 @@
 </div>
 
 <div class="wrap">
-  <main id="view" role="tabpanel" aria-live="off">
+  <main id="view" role="tabpanel" aria-live="off" tabindex="-1">
     <p class="muted">Loading your data…</p>
   </main>
 </div>

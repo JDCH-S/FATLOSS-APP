@@ -413,8 +413,7 @@
       msg(ui.backupMsg) +
       confirmBar('importBackup', '', 'Replace all current data with the backup' + (ui.pendingBackup && ui.pendingBackup.name ? ' “' + ui.pendingBackup.name + '”' : '') + '?', 'Replace') +
       '<div class="row"><button type="button" class="btn" id="backup-export" data-action="backup-export">Export all data</button>' +
-      '<button type="button" class="btn" id="backup-import" data-action="pick-file" data-target="file-backup">Import backup…</button>' +
-      '<input type="file" id="file-backup" class="hidden-file" accept="application/json,.json"></div>' +
+      '<button type="button" class="btn" id="backup-import" data-action="pick-file" data-target="file-backup">Import backup…</button></div>' +
       exportBox() + '</div>';
     return block('Backup', body);
   }
@@ -635,12 +634,14 @@
       changeRow('Carbs', nowT.carbs, nx.carbs, ' g') + changeRow('Fat', nowT.fat, nx.fat, ' g') +
       '<tr><td>Phase</td><td class="n">' + esc((nowT.phase || {}).label || '') + '</td><td class="n">' + esc((nx.phase || {}).label || '') + '</td><td></td></tr>' +
       '</tbody></table></div>';
-    const notes = [];
-    if (nx.deficit) notes.push('Deficit ' + fmt(nx.deficit) + ' kcal/day = ' + fmt((nx.rate || 0) * 100, 2) + ' % × ' + fmt(nx.weightUsed, 1) + ' kg × 7700 / 7.');
-    if (rec.transition) notes.push('Phase change: the whole deficit moves at once (the ±200 kcal cap applies only inside a phase). Changes go through carbs.');
-    if (rec.capped) notes.push('The change was capped at ±200 kcal for this week.');
-    if (nx.bmrFloorApplied) notes.push('Raised to the calorie floor (BMR).');
-    (rec.notes || []).forEach(function (n) { notes.push(n); });
+    // The engine's notes explain the observed/learned TDEE, cap, transition and macro split; add what they leave out.
+    const notes = (rec.notes || []).slice();
+    const said = notes.join(' ').toLowerCase();
+    if (nx.deficit && said.indexOf('deficit ' + fmt(nx.deficit).toLowerCase()) < 0) {
+      notes.unshift('Deficit ' + fmt(nx.deficit) + ' kcal/day = ' + fmt((nx.rate || 0) * 100, 2) + ' % × ' + fmt(nx.weightUsed, 1) + ' kg × 7700 / 7.');
+    }
+    if (rec.capped && said.indexOf('cap') < 0) notes.push('The change was capped at ±200 kcal for this week.');
+    if (nx.bmrFloorApplied && said.indexOf('bmr') < 0) notes.push('Raised to the calorie floor (BMR).');
 
     const savedLine = saved ? '<span class="chip good">Saved' + (saved.computedOn ? ' ' + esc(E.formatDate(saved.computedOn)) : '') + '</span>' : '<span class="chip warn">Not saved</span>';
     const changedSinceSave = saved && JSON.stringify(stripMeta(saved)) !== JSON.stringify(stripMeta(rec));
@@ -880,7 +881,7 @@
     const priceLine = '<span class="muted small">Prices last imported: <b>' + (imp.lastImport ? esc(dateLong(imp.lastImport)) + (imp.lastImportFile ? ' (' + esc(imp.lastImportFile) + ')' : '') : 'never') + '</b></span>';
     const tools = '<div class="row"><button type="button" class="btn" id="groc-export" data-action="groc-export">Export grocery list</button>' +
       '<button type="button" class="btn" id="groc-import" data-action="pick-file" data-target="file-prices">Import prices…</button>' +
-      '<input type="file" id="file-prices" class="hidden-file" accept="application/json,.json">' + priceLine + '</div>' + exportBox() + msg(ui.importMsg) + importErrors() + unmatchedPanel(c);
+      priceLine + '</div>' + exportBox() + msg(ui.importMsg) + importErrors() + unmatchedPanel(c);
 
     if (!state.plan || !state.plan.base) {
       h.push(block('Groceries', '<div class="panel stack"><p class="note">Generate a meal plan first; the grocery list is built from it.</p>' + tools + '</div>'));

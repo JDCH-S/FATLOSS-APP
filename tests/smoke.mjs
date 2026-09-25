@@ -23,8 +23,9 @@ function iso(d) { return d.toISOString().slice(0, 10); }
 const browser = await chromium.launch(process.env.PW_CHROMIUM ? { executablePath: process.env.PW_CHROMIUM } : {});
 const context = await browser.newContext({ viewport: { width: 1200, height: 900 }, acceptDownloads: true });
 const page = await context.newPage();
-page.on('pageerror', (e) => errors.push('pageerror: ' + e.message));
-page.on('console', (m) => { if (m.type() === 'error') errors.push('console: ' + m.text()); });
+page.on('pageerror', (e) => { errors.push('pageerror: ' + e.message); console.log('PAGE ERROR', e.message); });
+// Font requests can fail in sandboxes without internet; that is not an app error.
+page.on('console', (m) => { if (m.type() === 'error' && !/Failed to load resource/.test(m.text())) { errors.push('console: ' + m.text()); console.log('CONSOLE ERROR', m.text()); } });
 
 await page.goto(pageUrl);
 await page.waitForFunction(() => document.getElementById('status-strip')?.textContent.length > 10, null, { timeout: 15000 });
@@ -141,6 +142,7 @@ const importPath = join(out, 'prices.json');
 writeFileSync(importPath, JSON.stringify(importRows));
 await page.setInputFiles('#file-prices', importPath);
 await page.waitForTimeout(250);
+if (!(await page.locator('text=Imported prices.json').count())) console.log('banners after import:', await page.locator('.banner').allTextContents());
 check('price import summary shown', await page.locator('text=Imported prices.json').count() > 0);
 check('unmatched rows listed', await page.locator('text=Unmatched import rows').count() > 0);
 await page.selectOption('#map-0', { index: 1 });

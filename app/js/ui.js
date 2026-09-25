@@ -338,7 +338,8 @@
     const rows = blocks.map(function (b) {
       const now = b.start <= thisWeek && (!b.end || thisWeek <= b.end);
       const from = kgAt[b.start];
-      const to = b.end ? kgAt[b.end] : null;
+      // Weight after the block: the morning after its last Friday dinner.
+      const to = b.end ? kgAt[E.addDays(b.end, 1)] : null;
       const dates = b.type === 'final'
         ? 'from ' + E.formatDate(b.start) + (b.projected ? ' (projected)' : '')
         : E.formatDate(b.start) + ' – ' + E.formatDate(b.end) + ' · ' + b.length + ' wk';

@@ -493,9 +493,30 @@ test('rescalePlan across typical plans keeps tolerance for +300 / −200 kcal', 
       const r = M.rescalePlan(base, F, T1);
       const chk = M.checkPlan(r.plan, F, T1);
       assert.ok(chk.ok, c + ' ' + dk + ': ' + chk.issues.join(' | '));
-      itemsByRole(base, 'protein').forEach(function (x) { assert.equal(gramsAt(r.plan, x), x.it.grams); });
+      // protein items only move against the protein the carb change drags in (more carbs → trim protein items)
+      itemsByRole(base, 'protein').forEach(function (x) {
+        assert.ok(dk > 0 ? gramsAt(r.plan, x) <= x.it.grams : gramsAt(r.plan, x) >= x.it.grams, c + ' ' + dk + ' ' + x.it.foodId);
+      });
       itemsByRole(base, 'fat').forEach(function (x) { assert.equal(gramsAt(r.plan, x), x.it.grams); });
     });
+  });
+});
+
+test('rescalePlan: maintenance break adds the whole deficit as carbs and returns, protein held within ±10 g', function () {
+  [[3, 1970, 184], [4, 1970, 184], [5, 1970, 184], [4, 2300, 200], [5, 2600, 170]].forEach(function (c) {
+    const cut = targetsFor(c[1], c[2]);
+    const base = gen({ targets: cut, mealsPerDay: c[0] });
+    const deficit = 935;
+    const brk = Object.assign({}, cut, { kcal: cut.kcal + deficit, carbs: cut.carbs + deficit / 4 });
+    const up = M.rescalePlan(base, F, brk);
+    sameShape(up.plan, base);
+    const chkUp = M.checkPlan(up.plan, F, brk);
+    assert.ok(chkUp.ok, c + ' break: ' + chkUp.issues.join(' | '));
+    assert.ok(itemsByRole(base, 'carb').every(function (x) { return gramsAt(up.plan, x) >= x.it.grams; }), 'carb portions scaled up');
+    assert.ok(itemsByRole(base, 'carb').some(function (x) { return gramsAt(up.plan, x) > x.it.grams; }));
+    const down = M.rescalePlan(up.plan, F, cut);
+    const chkDown = M.checkPlan(down.plan, F, cut);
+    assert.ok(chkDown.ok, c + ' back to cut: ' + chkDown.issues.join(' | '));
   });
 });
 
@@ -515,7 +536,8 @@ test('rescalePlan: once carbs reach their minimum, fat items take the rest of a 
   const T1 = Object.assign({}, T0, { kcal: 1200, carbs: 0 });
   const r = M.rescalePlan(BASE, F, T1);
   sameShape(r.plan, BASE);
-  itemsByRole(BASE, 'protein').forEach(function (x) { assert.equal(gramsAt(r.plan, x), x.it.grams); });
+  // cutting carbs removes their protein too; protein items may only grow to make up for it
+  itemsByRole(BASE, 'protein').forEach(function (x) { assert.ok(gramsAt(r.plan, x) >= x.it.grams, x.it.foodId); });
   const fats = itemsByRole(BASE, 'fat');
   assert.ok(fats.some(function (x) { return gramsAt(r.plan, x) < x.it.grams; }), 'fat items decreased');
   assert.ok(fats.every(function (x) { return gramsAt(r.plan, x) >= 5; }), 'no item removed');

@@ -468,6 +468,156 @@ test('targets: a transition uses the latest learned TDEE and latest check-in wei
   assert.equal(t11.weightUsed, 81);
 });
 
+test('targets: a phase change without recent check-ins uses the latest logged week, not a stale check-in weight (finding 33)', function () {
+  const logs = {};
+  setWeek(logs, W(0), { weight: 85, kcal: 2000, steps: 9000 });
+  // −0.8 kg per cut week down to 78.6 kg in week 8 (below the 80 kg 15 % body-fat weight), flat through the break.
+  for (let k = 1; k <= 10; k++) setWeek(logs, W(k), { weight: 85 - 0.8 * Math.min(k, 8), kcal: 2000, steps: 9000 });
+  const state = makeState(null, logs);
+  for (let k = 1; k <= 3; k++) save(state, E.computeCheckin(state, W(k))); // last check-in average: 82.6 kg
+  close(E.latestWeight(state, W(11)), 78.6);
+  const t = E.targetsForWeek(state, W(11));
+  assert.equal(t.source, 'transition');
+  assert.equal(t.phase.label, 'Cut 2');
+  close(t.weightUsed, 78.6);
+  assert.equal(t.rate, 0.0075, 'below the 15 % body-fat weight: 0.75 %/week');
+  close(t.deficit, 0.0075 * 78.6 * KCAL_DAY);
+  close(t.targetLossKg, 0.0075 * 78.6);
+  assert.ok(t.explanation.indexOf('Weight 78.6 kg: 7-day average of Sat 28 Nov – Fri 4 Dec (7 weigh-ins).') >= 0, t.explanation.join('\n'));
+  close(E.targetsForWeek(state, W(9)).weightUsed, 78.6, 1e-9, 'the break uses week 8 too');
+
+  // A check-in with too few weigh-ins falls back to the latest logged week as well.
+  setWeek(state.logs, W(10), { weight: [78.6, 78.6, null, null, null, null, null] });
+  const r = E.computeCheckin(state, W(10));
+  assert.equal(r.valid, false);
+  assert.equal(r.transition, true);
+  close(r.next.weightUsed, 78.6);
+  assert.equal(r.next.rate, 0.0075);
+  assert.ok(r.notes.some(function (n) { return /^Weight 78\.6 kg: 7-day average of Sat 21 Nov – Fri 27 Nov/.test(n); }), r.notes.join('\n'));
+});
+
+test('explanations: carried and phase-change weeks show their numbers and where they come from (finding 36)', function () {
+  const state = makeState();
+  const t3 = E.targetsForWeek(state, W(3));
+  assert.equal(t3.explanation[0], 'No check-in saved for Sat 3 Oct – Fri 9 Oct: targets carried over unchanged from ' +
+    'Sat 26 Sep – Fri 2 Oct (Cut 1): 1972 kcal, protein 183.6 g, carbs 194.6 g, fat 51 g.');
+  assert.ok(t3.explanation.indexOf('Deficit = 1.0 % × 85 kg × 7700 kcal / 7 = 935 kcal/day (0.85 kg/week).') >= 0);
+
+  assert.deepEqual(E.targetsForWeek(state, W(9)).explanation, [
+    'Phase change Cut 1 → Maintenance break 1 (no check-in saved for Sat 14 Nov – Fri 20 Nov).',
+    'Target = learned TDEE 2907 kcal (no check-in yet: formula value) − deficit 0 kcal = 2907 kcal: the whole deficit moves ' +
+      'at once (no ±200 kcal cap).',
+    'TDEE = BMR 1805 × 1.2 + 8000 steps × 0.0005 × 85 kg + exercise 2805 kcal/week / 7 = 2166 + 340 + 401 = 2907 kcal.',
+    'Macros: protein 183.6 g (unchanged), carbs 194.6 → 428.3 g, fat 51 g (unchanged).'
+  ]);
+
+  // Learned TDEE from a check-in names that check-in; a cut names the weight it used.
+  state.checkins[W(7)] = { weekStart: W(7), learnedAfter: 2800, cur: { avgWeight: 81 }, notes: [] };
+  const c2 = E.targetsForWeek(state, W(11));
+  assert.equal(c2.explanation[1], 'Target = learned TDEE 2800 kcal (from the check-in of Sat 7 Nov – Fri 13 Nov) − deficit 891 kcal ' +
+    '= 1909 kcal: the whole deficit moves at once (no ±200 kcal cap).');
+  assert.ok(c2.explanation.indexOf('Weight 81 kg: check-in average for Sat 7 Nov – Fri 13 Nov.') >= 0, c2.explanation.join('\n'));
+  assert.ok(!c2.explanation.some(function (n) { return /^TDEE = BMR/.test(n); }), 'no formula line when the learned value is used');
+});
+
+// =====================================================================================
+// program snapshot: week-1 targets fixed at the start, protein never reduced (finding 4)
+// =====================================================================================
+function withSnapshot(state, todayIso) {
+  state.program = { snapshot: E.makeProgramSnapshot(state, todayIso) };
+  return state;
+}
+
+test('snapshot: null before the start or with an incomplete Setup, else the week-1 targets and the start weight', function () {
+  assert.equal(E.makeProgramSnapshot(makeState(), E.addDays(PS, -1)), null);
+  assert.equal(E.makeProgramSnapshot(makeState({ age: null }), PS), null);
+  const snap = E.makeProgramSnapshot(makeState(), W(3));
+  assert.equal(snap.programStart, PS);
+  assert.equal(snap.takenOn, W(3));
+  assert.equal(snap.startWeightKg, 85);
+  const w1 = E.targetsForWeek(makeState(), PS);
+  ['kcal', 'protein', 'fat', 'carbs', 'tdeeBasis', 'deficit', 'rate', 'weightUsed', 'targetLossKg'].forEach(function (k) {
+    close(snap.week1[k], w1[k], 1e-9, k);
+  });
+  assert.equal(snap.week1.tdeeSource, 'formula');
+  assert.equal(snap.week1.bmrFloorApplied, false);
+  assert.equal(snap.week1.limited, false);
+  assert.equal(snap.week1.phaseType, 'cut');
+  assert.deepEqual(snap.week1.explanation, w1.explanation);
+  // Start weight: the pre-week average with ≥ 4 weigh-ins, as for the target line.
+  const logs = {};
+  setWeek(logs, W(0), { weight: [86, 86.2, 85.8, 86, null, null, null] });
+  assert.equal(E.makeProgramSnapshot(makeState(null, logs), PS).startWeightKg, 86);
+  // A new snapshot ignores the stored one (it is taken again when the program start changes).
+  const old = withSnapshot(makeState(), PS);
+  old.setup.programStart = W(3);
+  old.setup.weightKg = 81;
+  const again = E.makeProgramSnapshot(old, W(3));
+  assert.equal(again.programStart, W(3));
+  assert.equal(again.startWeightKg, 81);
+});
+
+test('snapshot: Setup edits after the start no longer rewrite week 1, carried weeks or the target line (finding 4)', function () {
+  const state = withSnapshot(makeState(), PS);
+  const before = [1, 2, 5].map(function (k) { return E.targetsForWeek(state, W(k)); });
+  state.setup.weightKg = 81; // BF% still 20: live protein would be 2.7 × 64.8 = 175 g
+  close(E.calcProtein(state.setup).value, 2.7 * 64.8);
+  [1, 2, 5].forEach(function (k, i) {
+    const t = E.targetsForWeek(state, W(k));
+    assert.equal(t.source, k === 1 ? 'initial' : 'carry', 'week ' + k);
+    close(t.protein, PROTEIN, 1e-9, 'week ' + k);
+    close(t.kcal, before[i].kcal, 1e-9, 'week ' + k);
+    close(t.carbs, before[i].carbs, 1e-9, 'week ' + k);
+    close(t.fat, before[i].fat, 1e-9, 'week ' + k);
+  });
+  assert.match(E.targetsForWeek(state, W(1)).explanation[0], /saved when the program started/);
+  assert.equal(E.targetLine(state, PS, PS)[0].kg, 85, 'the target line still starts at the start weight');
+  // A snapshot of another program start is ignored: week 1 is live from Setup.
+  state.setup.programStart = W(3);
+  close(E.targetsForWeek(state, W(3)).protein, 2.7 * 64.8);
+  // Without a snapshot the week-1 targets stay live from Setup.
+  state.setup.programStart = PS;
+  delete state.program;
+  close(E.targetsForWeek(state, W(5)).protein, 2.7 * 64.8);
+});
+
+test('snapshot: the first check-in after a Setup edit keeps the program-start protein (finding 4)', function () {
+  const state = withSnapshot(week1State(), PS);
+  state.setup.weightKg = 84; // live protein 2.7 × 67.2 = 181.4 g
+  const r = save(state, E.computeCheckin(state, W(1)));
+  close(r.next.protein, PROTEIN);
+  close(E.targetsForWeek(state, W(3)).protein, PROTEIN);
+});
+
+test('snapshot: protein is lifted to the program-start target in every week, calories unchanged (finding 4)', function () {
+  const state = withSnapshot(makeState(), PS);
+  const lowP = 175, kcal = 1950, fat = 51, carbs = (kcal - 4 * lowP - 9 * fat) / 4;
+  state.checkins[W(4)] = { weekStart: W(4), learnedAfter: 2800, cur: { avgWeight: 82 }, notes: ['saved'],
+    next: { kcal: kcal, protein: lowP, fat: fat, carbs: carbs, tdeeBasis: 2800, tdeeSource: 'learned', deficit: 850, rate: 0.01,
+      weightUsed: 82, bmrFloorApplied: false } };
+  const t5 = E.targetsForWeek(state, W(5));
+  assert.equal(t5.source, 'checkin');
+  close(t5.protein, PROTEIN);
+  close(t5.kcal, kcal);
+  close(t5.carbs, carbs - (PROTEIN - lowP), 1e-9, 'the extra protein comes out of carbs');
+  close(t5.fat, fat);
+  assert.ok(t5.explanation.some(function (n) { return /^Protein raised to the program-start target of 183\.6 g/.test(n); }));
+  close(E.targetsForWeek(state, W(7)).protein, PROTEIN, 1e-9, 'carried weeks keep it');
+  close(E.targetsForWeek(state, W(9)).protein, PROTEIN, 1e-9, 'and so does a phase change');
+});
+
+test('snapshot: a goal edit that moves week 1 into another phase recomputes week 1, keeping the protein floor', function () {
+  const state = withSnapshot(makeState(), PS);
+  Object.assign(state.setup, { goalType: 'weight', goalWeightKg: 86, bodyFatPct: 25 }); // live protein 172.1 g
+  const t = E.targetsForWeek(state, W(1));
+  assert.equal(t.phase.type, 'final');
+  assert.equal(t.deficit, 0);
+  close(t.kcal, FORMULA_TDEE);
+  close(t.protein, PROTEIN);
+  assert.match(t.explanation[0], /recomputed from Setup/);
+  close(E.targetsForWeek(state, W(0)).protein, PROTEIN, 1e-9, 'the pre-start preview too');
+});
+
 // =====================================================================================
 // check-in
 // =====================================================================================
@@ -687,17 +837,23 @@ test('check-in: stall only after two consecutive weeks below 70 % of target', fu
   const s = stallState({ kcal: 2000, steps: 9000 });
   assert.equal(s.r1.belowTarget, true);
   assert.equal(s.r1.stall, false, 'first week below target');
-  // Week 1 not saved: no stall yet.
+  assert.equal(s.r1.prevBelowTargetSource, null, 'the pre-week has no logged week before it to judge');
+  // Week 1 not saved: its logs still show it below target, so the stall is found (review finding 3).
   const unsaved = E.computeCheckin(s.state, W(2));
   assert.equal(unsaved.belowTarget, true);
-  assert.equal(unsaved.stall, false);
+  assert.equal(unsaved.stall, true);
+  assert.equal(unsaved.prevBelowTarget, true);
+  assert.equal(unsaved.prevBelowTargetSource, 'logs');
   // Saved but not below target: no stall.
   save(s.state, Object.assign({}, s.r1, { belowTarget: false }));
-  assert.equal(E.computeCheckin(s.state, W(2)).stall, false);
+  const notBelow = E.computeCheckin(s.state, W(2));
+  assert.equal(notBelow.stall, false);
+  assert.equal(notBelow.prevBelowTargetSource, 'checkin', 'a saved record wins over the logs');
   // Saved and below target: stall.
   save(s.state, s.r1);
   const r2 = E.computeCheckin(s.state, W(2));
   assert.equal(r2.stall, true);
+  assert.equal(r2.prevBelowTargetSource, 'checkin');
   assert.equal(r2.diagnosis, 'adaptation');
   // Back on track the week after: no stall.
   const ok = stallState({ kcal: 2000, steps: 9000 });
@@ -746,6 +902,54 @@ test('check-in: diagnosis order neat → tracking → adaptation, and what each 
   close(ra.observedTDEE, 2000 + 0.2 * 1100);
   close(ra.learnedAfter, 0.7 * ra.learnedBefore + 0.3 * ra.observedTDEE);
   assert.notEqual(ra.next.kcal, E.targetsForWeek(ad.state, W(2)).kcal);
+});
+
+test('check-in: a missed check-in no longer hides a two-week stall; the NEAT flag holds the food (finding 3)', function () {
+  function program(skipWeek5) {
+    const logs = {};
+    [85, 84.2, 83.4, 82.6, 82.3, 82.1, 81.9].forEach(function (kg, i) {
+      setWeek(logs, W(i), { weight: kg, kcal: 2000, steps: i >= 5 ? 5500 : 8000 });
+    });
+    const state = makeState(null, logs);
+    for (let k = 1; k <= 5; k++) if (!(skipWeek5 && k === 5)) save(state, E.computeCheckin(state, W(k)));
+    return state;
+  }
+  const state = program(true);
+  const thisT = E.targetsForWeek(state, W(6));
+  const r = E.computeCheckin(state, W(6));
+  assert.equal(r.belowTarget, true);
+  assert.equal(r.prevBelowTarget, true);
+  assert.equal(r.prevBelowTargetSource, 'logs');
+  assert.equal(r.stall, true);
+  assert.equal(r.diagnosis, 'neat');
+  assert.equal(r.applied, false);
+  close(r.learnedAfter, r.learnedBefore, 1e-9, 'no food cut on a NEAT drop');
+  close(r.next.kcal, thisT.kcal);
+  assert.ok(r.notes.indexOf('No check-in saved for Sat 24 Oct – Fri 30 Oct; from its logs it lost 0.2 kg vs target 0.82 kg (24 %), ' +
+    'below 70 % of target.') >= 0, r.notes.join('\n'));
+  // Same outcome as when week 5 was saved.
+  const full = E.computeCheckin(program(false), W(6));
+  assert.equal(full.prevBelowTargetSource, 'checkin');
+  assert.equal(full.diagnosis, 'neat');
+  close(full.next.kcal, r.next.kcal);
+
+  // Too few weigh-ins to judge week 5 from its logs: no stall is claimed.
+  setWeek(state.logs, W(4), { weight: [82.3, 82.3, 82.3, null, null, null, null] });
+  const sparse = E.computeCheckin(state, W(6));
+  assert.equal(sparse.prevBelowTargetSource, null);
+  assert.equal(sparse.prevBelowTarget, false);
+  assert.equal(sparse.stall, false);
+  assert.ok(sparse.notes.some(function (n) { return /logs are too sparse to judge its loss/.test(n); }));
+});
+
+test('check-in: a learned TDEE updated by this check-in is not called the formula value', function () {
+  const state = week1State();
+  setWeek(state.logs, W(2), { weight: 83.6, kcal: 2000, steps: 9000 });
+  const r = E.computeCheckin(state, W(2)); // week 1 not saved, week 3 uses the learned value
+  assert.equal(r.applied, true);
+  assert.ok(r.notes.some(function (n) { return /^Next week: learned TDEE \d+ kcal \(updated by this check-in\)/.test(n); }), r.notes.join('\n'));
+  const held = E.computeCheckin(makeState(), W(8)); // no logs: held at the formula value through the phase change
+  assert.ok(held.notes.some(function (n) { return /learned TDEE 2907 kcal \(no check-in yet: formula value\)/.test(n); }), held.notes.join('\n'));
 });
 
 test('check-in: protein is never reduced even if Setup now gives less', function () {
@@ -806,6 +1010,20 @@ test('history lookups: latestLearned, latestWeight, goalReachedWeek', function (
   assert.equal(E.goalReachedWeek(state), W(4), 'earliest goal-reached check-in + 7 days');
 });
 
+test('history lookups: latestWeight takes the newest logged week (≥ 4 weigh-ins) or check-in average (finding 33)', function () {
+  const logs = {};
+  setWeek(logs, W(2), { weight: 83 });
+  setWeek(logs, W(4), { weight: [82, 82, 82, null, null, null, null] }); // 3 weigh-ins: not enough
+  const state = makeState(null, logs);
+  close(E.latestWeight(state, W(6)), 83, 1e-9, 'week 2 logs');
+  state.checkins[W(3)] = { weekStart: W(3), cur: { avgWeight: 82.5 } };
+  close(E.latestWeight(state, W(6)), 82.5, 1e-9, 'a newer check-in beats older logs');
+  setWeek(logs, W(3), { weight: 82.4 });
+  close(E.latestWeight(state, W(6)), 82.4, 1e-9, 'for the same week the logs win');
+  close(E.latestWeight(state, W(3)), 83, 1e-9, 'strictly before the week');
+  assert.equal(E.latestWeight(makeState(), W(6)), 85, 'Setup weight when nothing is logged');
+});
+
 // =====================================================================================
 // projections
 // =====================================================================================
@@ -856,6 +1074,92 @@ test('projectBlockEnd: final maintenance holds the weight', function () {
   assert.equal(p.weightKg, 77);
   assert.equal(p.weeks, 0);
   assert.equal(p.blockEnd, null);
+});
+
+test('projectBlockEnd: the explanation gives the start source, rates, goal and the week-by-week path (finding 36)', function () {
+  const state = makeState();
+  const p = E.projectBlockEnd(state, W(3));
+  assert.deepEqual(p.explanation, [
+    'Start: 85 kg (Setup weight).',
+    'Cut 1: 6 weeks to Fri 20 Nov (dinner). Each week loses 1.0 % of the weight while above the 15 % body-fat weight (80 kg), ' +
+      '0.75 % at or below it, never going below the goal (77.27 kg).',
+    'Week by week: 85 → 84.15 → 83.31 → 82.48 → 81.65 → 80.83 → 80.03 kg.'
+  ]);
+  assert.equal(p.explanation[2].split(' → ').pop(), p.weightKg.toFixed(2) + ' kg.', 'the path ends at the projected weight');
+
+  const logs = { '2026-10-06': { weight: 83.9 }, '2026-10-07': { weight: 84.1 }, '2026-10-08': { weight: 84.0 } };
+  const mid = E.projectBlockEnd(makeState(null, logs), '2026-10-08');
+  assert.equal(mid.explanation[0], 'Start: 84 kg (7-day average of 3 weigh-ins, Fri 2 Oct – Thu 8 Oct).');
+  assert.match(mid.explanation[1], /^Cut 1: 6\.3 weeks to Fri 20 Nov .*; the last 0\.29 of a week counts in part\.$/);
+
+  const pre = E.projectBlockEnd(state, '2026-09-20');
+  assert.equal(pre.explanation[0], 'Program starts Sat 26 Sep (dinner): Cut 1 is projected from the start.');
+  const brk = E.projectBlockEnd(state, '2026-11-25');
+  assert.equal(brk.explanation[1], 'Maintenance break 1: maintenance, weight held at 85 kg for 1.4 weeks until Fri 4 Dec (dinner).');
+});
+
+test('programSummary: explanation gives the program week, block and goal (finding 36)', function () {
+  const sum = E.programSummary(makeState(), '2026-10-12');
+  assert.deepEqual(sum.explanation, [
+    'Program week 3, counted in diet weeks (Saturday dinner → Friday dinner) from Sat 26 Sep.',
+    'Cut 1: week 3 of 8, Sat 26 Sep – Fri 20 Nov (dinner). Blocks repeat an 8-week cut and a 2-week maintenance break until ' +
+      'the goal is reached.',
+    'Goal weight = 68 kg lean mass / (1 − 12 %) = 77.27 kg.'
+  ]);
+  assert.equal(E.programSummary(makeState(), '2026-09-20').explanation[0], 'Program starts Sat 26 Sep (dinner), in 6 days.');
+  const state = makeState();
+  state.checkins[W(3)] = { weekStart: W(3), goalReached: true, cur: { avgWeight: 77 }, learnedAfter: 2700 };
+  assert.ok(E.programSummary(state, '2026-10-20').explanation.indexOf('Goal weight reached at the check-in of Sat 10 Oct – Fri 16 Oct ' +
+    '(77 kg ≤ goal 77.27 kg): final maintenance from Sat 17 Oct.') >= 0);
+});
+
+test('goal met at the start: final maintenance from week 1; targets, projection and target line agree (finding 31)', function () {
+  const state = makeState({ bodyFatPct: 14, goalBodyFatPct: 15 }); // goal weight 73.1 / 0.85 = 86 kg ≥ 85 kg
+  close(E.calcGoalWeight(state.setup).value, 86);
+  assert.equal(E.goalReachedWeek(state), PS);
+  const t1 = E.targetsForWeek(state, W(1));
+  assert.equal(t1.phase.type, 'final');
+  assert.equal(t1.deficit, 0);
+  assert.equal(t1.targetLossKg, 0);
+  close(t1.kcal, FORMULA_TDEE, 1e-9, 'maintenance, no cut deficit');
+  assert.ok(t1.explanation.indexOf('Goal already reached at the start: 85 kg (Setup weight) ≤ goal 86 kg, so the program is in ' +
+    'final maintenance from week 1.') >= 0, t1.explanation.join('\n'));
+  [2, 9, 11].forEach(function (k) {
+    const t = E.targetsForWeek(state, W(k));
+    assert.equal(t.phase.type, 'final', 'week ' + k);
+    close(t.kcal, t1.kcal, 1e-9, 'week ' + k);
+  });
+  close(E.targetsForWeek(state, W(0)).kcal, t1.kcal, 1e-9, 'the pre-start preview agrees');
+  const p = E.projectBlockEnd(state, W(3));
+  assert.equal(p.blockEnd, null);
+  assert.equal(p.weightKg, 85);
+  assert.equal(E.projectBlockEnd(state, '2026-09-20').blockEnd, null, 'before the start too');
+  assert.ok(E.targetLine(state, PS, W(20)).every(function (pt) { return pt.kg === 85; }), 'flat target line');
+  const sum = E.programSummary(state, W(3));
+  assert.equal(sum.phase.label, 'Final maintenance');
+  assert.ok(sum.explanation.some(function (n) { return /^Goal already reached at the start/.test(n); }));
+  // A goal equal to the start weight counts; just below it is a cut.
+  assert.equal(E.goalReachedWeek(makeState({ goalType: 'weight', goalWeightKg: 85 })), PS);
+  const below = makeState({ goalType: 'weight', goalWeightKg: 84.9 });
+  assert.equal(E.goalReachedWeek(below), null);
+  assert.equal(E.targetsForWeek(below, PS).phase.type, 'cut');
+});
+
+test('goal met at the start: start weight is the snapshot one, else the pre-week average, else Setup (finding 31)', function () {
+  // Pre-week average 86 kg (≥ 4 weigh-ins) is above an 85.5 kg goal: a cut, although Setup says 85 kg.
+  const logs = {};
+  setWeek(logs, W(0), { weight: 86 });
+  const cut = makeState({ goalType: 'weight', goalWeightKg: 85.5 }, logs);
+  assert.equal(E.goalReachedWeek(cut), null);
+  assert.equal(E.targetLine(cut, PS, PS)[0].kg, 86);
+  // Snapshot start weight 85 kg ≤ 86 kg goal: still final after the Setup weight is changed to 90 kg.
+  const snap = withSnapshot(makeState({ goalType: 'weight', goalWeightKg: 86 }), PS);
+  assert.equal(snap.program.snapshot.week1.phaseType, 'final');
+  snap.setup.weightKg = 90;
+  assert.equal(E.goalReachedWeek(snap), PS);
+  const t4 = E.targetsForWeek(snap, W(4));
+  assert.equal(t4.phase.type, 'final');
+  close(t4.kcal, FORMULA_TDEE, 1e-9, 'week 1 from the snapshot, carried');
 });
 
 test('targetLine: one point per day from the program start, down in cuts, flat in breaks, stops at goal', function () {

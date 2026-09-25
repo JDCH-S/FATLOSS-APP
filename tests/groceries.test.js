@@ -124,7 +124,7 @@ test('export has the documented shape', function () {
   assert.deepEqual(ex.week, { start: '2026-10-03', end: '2026-10-09', label: 'Sat 3 Oct dinner → Fri 9 Oct dinner' });
   const eggs = ex.items.find(function (i) { return i.food_id === 'eggs'; });
   assert.deepEqual(eggs, {
-    food_id: 'eggs', food: 'Eggs', food_nl: 'Eieren', weekly_g: 770, unit_g: 55,
+    food_id: 'eggs', food: 'Eggs', food_nl: 'Eieren', weekly_g: 770, unit_g: 55, drained_ratio: null, g_per_ml: null,
     stores: { Colruyt: [{ ean: '5400141000001', product: 'Boni eieren 10 st', pack_size_g: 550, url: 'https://example.org/eggs' }], Delhaize: [], Carrefour: [] }
   });
   const chk = ex.items.find(function (i) { return i.food_id === 'chicken_breast'; });
@@ -218,4 +218,122 @@ test('mapImportRow adds a new import row with a unique id', function () {
   assert.equal(out[1].source, 'import');
   const out2 = G.mapImportRow(out, Object.assign({}, r, { ean: '' }), 'tofu');
   assert.equal(out2[2].id, 'colruyt-tofu-n');
+});
+
+// ---------- review findings ----------
+
+const PRODUCTS = require('../app/js/products.js').PRODUCTS;
+
+test('canned foods are counted in drained grams everywhere (finding 7)', function () {
+  assert.equal(FOODS.tuna_water.drainedRatio, 0.7);
+  assert.equal(FOODS.chickpeas.drainedRatio, 0.6);
+  assert.equal(FOODS.kidney_beans.drainedRatio, 0.6);
+  assert.equal(FOODS.olive_oil.gPerMl, 0.92);
+  assert.equal(FOODS.chicken_breast.drainedRatio, undefined);
+  // The Delhaize seed rows held the net can weight; 1400 g drained chickpeas needs 6 cans of 240 g, not 4 of 400 g.
+  const seed = {};
+  PRODUCTS.forEach(function (r) { seed[r.id] = r; });
+  assert.equal(seed['delhaize-chickpeas'].packSizeG, 240);
+  assert.equal(seed['delhaize-tuna_water'].packSizeG, 315);
+  assert.equal(seed['delhaize-kidney_beans'].packSizeG, 150);
+  const br = G.storeBreakdown([{ foodId: 'chickpeas', grams: 1400, perMeal: [] }, { foodId: 'tuna_water', grams: 1050, perMeal: [] }], PRODUCTS, '2026-09-25');
+  const dh = {};
+  br.stores.Delhaize.items.forEach(function (i) { dh[i.foodId] = i; });
+  assert.equal(dh.chickpeas.packs, 6);
+  assert.equal(dh.tuna_water.packs, 4);
+  // The export tells the price script how to turn a label's net weight into the food's basis.
+  const ex = G.buildExport([{ foodId: 'chickpeas', grams: 1400 }, { foodId: 'olive_oil', grams: 130 }, { foodId: 'oats', grams: 360 }], PRODUCTS, FOODS,
+    { start: '2026-10-03', end: '2026-10-09' }, '2026-10-02');
+  const it = {};
+  ex.items.forEach(function (i) { it[i.food_id] = i; });
+  assert.equal(it.chickpeas.drained_ratio, 0.6);
+  assert.equal(it.chickpeas.g_per_ml, null);
+  assert.equal(it.olive_oil.g_per_ml, 0.92);
+  assert.equal(it.oats.drained_ratio, null);
+  assert.equal(it.chickpeas.stores.Delhaize[0].pack_size_g, 240);
+});
+
+test('import rows can carry match_product: the table name used for matching (finding 8)', function () {
+  const text = JSON.stringify([
+    { store: 'Carrefour', ean: '3560071012345', product: 'Carrefour Classic Pindakaas crunchy', match_product: "Calvé Pindakaas 100% pinda's", pack_size_g: 350, price_eur: 2.19, date: '2026-09-25' },
+    { store: 'Carrefour', ean: '', product: 'Kikkererwten', match_product: '  ', pack_size_g: 240, price_eur: 0.89, date: '2026-09-25' }
+  ]);
+  const parsed = G.parseImport(text);
+  assert.deepEqual(parsed.errors, []);
+  assert.equal(parsed.rows[0].match_product, "Calvé Pindakaas 100% pinda's");
+  assert.equal('match_product' in parsed.rows[1], false, 'a blank match_product is dropped');
+  const products = [
+    row('k-pb', 'Carrefour', 'peanut_butter', 350, 3.29, { product: "Calvé Pindakaas 100% pinda's", source: 'estimate', date: null }),
+    row('k-cp', 'Carrefour', 'chickpeas', 240, 0.99, { product: 'Kikkererwten', source: 'estimate', date: null })
+  ];
+  const res = G.applyImport(products, parsed.rows, '2026-09-25');
+  assert.equal(res.summary.matched, 2);
+  assert.deepEqual(res.unmatched, []);
+  const pb = res.products[0];
+  assert.equal(pb.product, 'Carrefour Classic Pindakaas crunchy', 'the row shows the product the price belongs to');
+  assert.equal(pb.ean, '3560071012345');
+  assert.equal(pb.price, 2.19);
+  // Next week the row matches by its new EAN, and without an EAN by its new (store) name.
+  const again = G.applyImport(res.products, [{ store: 'Carrefour', ean: '', product: 'Carrefour Classic Pindakaas crunchy', pack_size_g: 350, price_eur: 2.29, promo: false, date: '2026-10-02' }], '2026-10-02');
+  assert.equal(again.products[0].price, 2.29);
+});
+
+test('applyImport matching order: store + EAN, then match_product, then product (finding 8)', function () {
+  const products = [
+    row('a', 'Colruyt', 'skyr', 500, 1, { ean: '5400141044429', product: 'Skyr A' }),
+    row('b', 'Colruyt', 'skyr', 500, 1, { product: 'Skyr B' }),
+    row('c', 'Colruyt', 'skyr', 500, 1, { product: 'Skyr C' })
+  ];
+  function hit(r) {
+    const res = G.applyImport(products, [Object.assign({ store: 'Colruyt', ean: '', pack_size_g: 500, price_eur: 2, promo: false, date: null }, r)], '2026-09-25');
+    return res.matched.map(function (m) { return m.productId; });
+  }
+  assert.deepEqual(hit({ ean: '5400141044429', product: 'Skyr C', match_product: 'Skyr B' }), ['a']);
+  assert.deepEqual(hit({ product: 'Skyr C', match_product: 'Skyr B' }), ['b']);
+  assert.deepEqual(hit({ product: 'Skyr C', match_product: 'Gone' }), ['c']);
+  assert.deepEqual(hit({ product: 'Skyr C', match_product: 'Skyr B', store: 'Delhaize' }), []);
+});
+
+test('barcodes match without leading zeros: GTIN-14, EAN-13 and UPC-12 forms (finding 37)', function () {
+  const products = [
+    row('c-skyr', 'Colruyt', 'skyr', 500, 1, { ean: '5400141571738' }),
+    row('c-upc', 'Colruyt', 'whey', 900, 30, { ean: '0012345678905' })
+  ];
+  const res = G.applyImport(products, [
+    { store: 'Colruyt', ean: '05400141571738', product: 'BONI Skyr natuur 500g', pack_size_g: 500, price_eur: 1.29, promo: false, date: null },
+    { store: 'Colruyt', ean: '012345678905', product: 'Whey', pack_size_g: 900, price_eur: 29.99, promo: false, date: null },
+    { store: 'Colruyt', ean: '5400141571739', product: 'Other', pack_size_g: 500, price_eur: 1, promo: false, date: null }
+  ], '2026-09-25');
+  assert.equal(res.products[0].price, 1.29);
+  assert.equal(res.products[0].ean, '5400141571738', 'the stored barcode is kept');
+  assert.equal(res.products[1].price, 29.99);
+  assert.equal(res.summary.unmatched, 1);
+});
+
+test('mergeUnmatched lists each store + barcode (or store + name) once, newest row wins (finding 41)', function () {
+  function ur(store, ean, product, price, date) { return { store: store, ean: ean, product: product, pack_size_g: 1000, price_eur: price, promo: false, date: date }; }
+  const existing = [
+    ur('Delhaize', '5400000000017', 'Discovered skyr 1kg', 3.49, '2026-09-18'),
+    ur('Carrefour', '', 'Discovered oats 1kg', 1.99, '2026-09-18')
+  ];
+  const before = JSON.parse(JSON.stringify(existing));
+  // The same file imported again, a week later: nothing is added, prices and dates are refreshed.
+  const later = [
+    ur('Delhaize', '05400000000017', 'Discovered skyr 1 kg', 3.29, '2026-09-25'),
+    ur('Carrefour', '', 'discovered  OATS 1kg', 2.09, '2026-09-25'),
+    ur('Colruyt', '5400000000017', 'Discovered skyr 1kg', 3.39, '2026-09-25')
+  ];
+  let list = G.mergeUnmatched(existing, later);
+  assert.deepEqual(existing, before, 'inputs untouched');
+  assert.equal(list.length, 3, 'a different store is a different row');
+  assert.deepEqual(list.map(function (r) { return r.price_eur; }), [3.29, 2.09, 3.39]);
+  list = G.mergeUnmatched(list, later);
+  list = G.mergeUnmatched(list, later);
+  assert.equal(list.length, 3, 'three imports of the same file keep one copy of each row');
+  // An older file imported afterwards does not overwrite a newer price; a row without a date counts as newer.
+  assert.equal(G.mergeUnmatched(list, [existing[0]])[0].price_eur, 3.29);
+  assert.equal(G.mergeUnmatched(list, [ur('Delhaize', '5400000000017', 'x', 3.19, null)])[0].price_eur, 3.19);
+  // Duplicates already stored before this fix collapse too; junk entries are dropped.
+  assert.equal(G.mergeUnmatched(existing.concat(existing, [null]), []).length, 2);
+  assert.deepEqual(G.mergeUnmatched(null, null), []);
 });

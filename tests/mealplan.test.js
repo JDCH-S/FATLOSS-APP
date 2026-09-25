@@ -113,8 +113,8 @@ test('module works in the browser branch (window.FL.mealplan) and uses no clock 
   vm.runInNewContext(src, sandbox);
   assert.equal(typeof sandbox.window.FL.mealplan.generatePlan, 'function');
   assert.ok(!/Math\.random|Date\.now|new Date\s*\(/.test(src));
-  ['MEAL_LAYOUTS', 'generatePlan', 'rescalePlan', 'swapCandidates', 'swapFood', 'planTotals', 'checkPlan', 'roundGrams', 'normalizeFood']
-    .forEach(function (k) { assert.ok(k in M, k); });
+  ['MEAL_LAYOUTS', 'generatePlan', 'rescalePlan', 'swapCandidates', 'swapFood', 'replaceDisallowed', 'planTotals', 'checkPlan',
+    'roundGrams', 'normalizeFood', 'limitDecimals'].forEach(function (k) { assert.ok(k in M, k); });
 });
 
 test('MEAL_LAYOUTS match the spec', function () {
@@ -158,15 +158,34 @@ test('normalizeFood fills defaults for custom foods and keeps existing fields', 
   assert.deepEqual(make({ category: 'dairy', kcal: 60, protein: 3.4, fat: 1.5, carbs: 5 }).slots, []);
 
   const p = make({ category: 'protein' });
-  assert.deepEqual(p.meals, ['breakfast', 'main']);
   assert.equal(p.fill, 3);
   assert.equal(p.unit, null);
-  assert.equal(p.maxPerMeal, 350);
-  // fat/carb foods: grams giving ~900 kcal (rounded to 5 g, or whole units)
-  assert.equal(make({ category: 'carb', kcal: 360 }).maxPerMeal, 250);
-  assert.equal(make({ category: 'fat', kcal: 600 }).maxPerMeal, 150);
-  assert.equal(make({ category: 'carb', kcal: 250, unit: { name: 'slice', grams: 40 } }).maxPerMeal, 360);
-  assert.equal(make({ category: 'protein', unit: { name: 'pack', grams: 100 } }).maxPerMeal, 300);
+  // meal types by category, as in the built-in database: lunch/dinner for protein, carb, vegetable foods and cooking
+  // fats; breakfast and snacks too for dairy, fruit, nuts and seeds. An explicit `meals` (the form's "suitable for")
+  // wins. (Every custom food used to default to breakfast + main, so custom potatoes became a snack: finding 13.)
+  assert.deepEqual(p.meals, ['main']);
+  assert.deepEqual(make({ category: 'carb' }).meals, ['main']);
+  assert.deepEqual(make({ category: 'vegetable' }).meals, ['main']);
+  assert.deepEqual(make({ category: 'fruit' }).meals, ['breakfast', 'main']);
+  assert.deepEqual(make({ category: 'dairy', kcal: 80, protein: 8, fat: 1 }).meals, ['breakfast', 'main']);
+  assert.deepEqual(make({ category: 'fat', kcal: 900, protein: 0, carbs: 0, fat: 100 }).meals, ['main']);                 // oil
+  assert.deepEqual(make({ category: 'fat', kcal: 620, protein: 25, carbs: 12, fat: 50 }).meals, ['breakfast', 'main']);   // nut butter
+  assert.deepEqual(make({ category: 'carb', meals: ['breakfast'] }).meals, ['breakfast']);
+  assert.deepEqual(make({ category: 'carb', meals: [] }).meals, ['main']);
+  // per-meal caps modelled on the built-in foods of the same role (5 g steps or whole units); they used to be the
+  // grams giving 900 kcal for carb and fat foods (1,200 g of potatoes, 100 g of oil: finding 13)
+  assert.equal(make({ category: 'protein', kcal: 108 }).maxPerMeal, 300);          // lean meat: 300 g
+  assert.equal(make({ category: 'protein', kcal: 380 }).maxPerMeal, 120);          // protein powder: ~450 kcal
+  assert.equal(make({ category: 'carb', kcal: 75 }).maxPerMeal, 500);              // potatoes: 500 g
+  assert.equal(make({ category: 'carb', kcal: 360 }).maxPerMeal, 155);             // dry grain: ~550 kcal
+  assert.equal(make({ category: 'fat', kcal: 900, fat: 100 }).maxPerMeal, 25);     // oil: ~225 kcal
+  assert.equal(make({ category: 'fat', kcal: 620 }).maxPerMeal, 35);               // nuts
+  assert.equal(make({ category: 'fat', kcal: 160 }).maxPerMeal, 140);              // avocado
+  assert.equal(make({ category: 'vegetable', kcal: 25 }).maxPerMeal, 400);
+  assert.equal(make({ category: 'fruit', kcal: 50 }).maxPerMeal, 300);
+  assert.equal(make({ category: 'carb', kcal: 250, unit: { name: 'slice', grams: 40 } }).maxPerMeal, 200);
+  assert.equal(make({ category: 'protein', unit: { name: 'pack', grams: 100 } }).maxPerMeal, 200);
+  assert.equal(make({ category: 'carb', maxPerMeal: 90 }).maxPerMeal, 90);
 
   // built-in foods pass through unchanged, and the input is never mutated
   const eggs = clone(F.eggs);
@@ -189,9 +208,18 @@ test('property grid: every combo meets the rules with the default liked foods', 
         const T = targetsFor(kcal, protein);
         if (T.carbs < 80) return;
         const plan = gen({ targets: T, mealsPerDay: n });
+        const label = n + ' meals / ' + kcal + ' kcal / ' + protein + ' g';
         assert.equal(plan.mealsPerDay, n);
         assert.deepEqual(plan.targets, T);
-        assertPlanMeetsRules(plan, F, T, allowed, n + ' meals / ' + kcal + ' kcal / ' + protein + ' g');
+        // 3 meals near the top of the range: every carb portion is at its maximum, so fat ends well above its target;
+        // that is reported (finding 14) and is the only warning
+        const fatHigh = plan.warnings.filter(function (w) { return /^Fat .* above the .* target/.test(w); });
+        if (fatHigh.length) {
+          assert.ok(n === 3 && kcal >= 3000, label);
+          itemsByRole(plan, 'carb').forEach(function (x) { assert.equal(x.it.grams, F[x.it.foodId].maxPerMeal, label + ' ' + x.it.foodId); });
+        }
+        const rest = plan.warnings.filter(function (w) { return fatHigh.indexOf(w) < 0; });
+        assertPlanMeetsRules(Object.assign({}, plan, { warnings: rest }), F, T, allowed, label);
         combos++;
       });
     }
@@ -328,19 +356,60 @@ test('custom foods without slots/meals/fill/maxPerMeal are normalized and used',
   const map = foods.byId(foods.FOODS.concat([seitan]));
   const T = targetsFor(2400, 185);
 
-  const liked = LIKED.concat(['custom_seitan']);
+  // (with cod and turkey liked too, seitan would rank third among the main-meal proteins and not be needed)
+  const liked = LIKED.filter(function (id) { return id !== 'cod' && id !== 'turkey_breast'; }).concat(['custom_seitan']);
   const plan = gen({ foods: map, liked: liked, targets: T });
   assertPlanMeetsRules(plan, map, T, allowedSet(liked), 'custom + defaults');
   assert.ok(plan.meals.some(function (m) { return m.items.some(function (it) { return it.foodId === 'custom_seitan'; }); }));
 
-  // the custom food as the only protein: it fills every meal's protein role (default meals: breakfast + main)
+  // the custom food as the only protein: without `meals` a protein food suits lunch and dinner only, so breakfast and
+  // the snack report a missing protein food; marked as suitable for breakfast too, it fills every meal
   const only = ['custom_seitan', 'potatoes', 'oats', 'broccoli', 'carrots', 'apple', 'olive_oil', 'almonds'];
-  const plan2 = gen({ foods: map, liked: only, targets: T });
-  assertPlanMeetsRules(plan2, map, T, allowedSet(only), 'custom only protein');
+  const mainOnly = gen({ foods: map, liked: only, targets: T });
+  mainOnly.meals.forEach(function (m) {
+    const p = m.items.filter(function (it) { return it.role === 'protein'; });
+    assert.deepEqual(p.map(function (it) { return it.foodId; }), TYPE[m.key] === 'main' ? ['custom_seitan'] : [], m.key);
+  });
+  assert.ok(mainOnly.warnings.some(function (w) { return /^Breakfast: no protein food/.test(w); }));
+  const allDay = foods.byId(foods.FOODS.concat([Object.assign({}, seitan, { meals: ['breakfast', 'main'] })]));
+  const plan2 = gen({ foods: allDay, liked: only, targets: T });
+  assertPlanMeetsRules(plan2, allDay, T, allowedSet(only), 'custom only protein');
   plan2.meals.forEach(function (m) {
     assert.equal(m.items.filter(function (it) { return it.role === 'protein'; })[0].foodId, 'custom_seitan');
   });
   assert.equal(seitan.slots, undefined, 'caller food not mutated');
+});
+
+test('custom foods get realistic portions and suitable meals (finding 13)', function () {
+  // stored exactly as the Setup form stores them: no slots, meals, fill or maxPerMeal
+  const potatoes = { id: 'custom_baby_potatoes', name: 'Baby potatoes', nameNl: '', category: 'carb', kcal: 75, protein: 2, carbs: 16, fat: 0.1, fibre: 1.5, unit: null, custom: true };
+  const oil = { id: 'custom_rapeseed_oil', name: 'Rapeseed oil', nameNl: '', category: 'fat', kcal: 900, protein: 0, carbs: 0, fat: 100, fibre: 0, unit: null, custom: true };
+  const map = foods.byId(foods.FOODS.concat([potatoes, oil]));
+  const liked = LIKED.filter(function (id) { return ['potatoes', 'olive_oil', 'rice_basmati'].indexOf(id) < 0; }).concat([potatoes.id, oil.id]);
+  let used = 0;
+  // before: dinner with 1,005–1,125 g of baby potatoes, 30–35 g of oil in one meal, potatoes as an afternoon snack
+  [[2800, 170, 3], [2400, 170, 3], [2900, 170, 3], [2800, 170, 4], [3300, 170, 4], [2100, 170, 3]].forEach(function (c) {
+    const label = c.join('/');
+    const plan = gen({ foods: map, liked: liked, targets: targetsFor(c[0], c[1]), mealsPerDay: c[2] });
+    assertStructure(plan, map, allowedSet(liked), label);
+    plan.meals.forEach(function (m) {
+      m.items.forEach(function (it) {
+        if (it.foodId === potatoes.id) { used++; assert.equal(TYPE[m.key], 'main', label); assert.ok(it.grams <= 500, label + ' ' + it.grams); }
+        if (it.foodId === oil.id) { used++; assert.equal(TYPE[m.key], 'main', label); assert.ok(it.grams <= 25, label + ' ' + it.grams); }
+      });
+    });
+    const d = totals(plan, map).day;
+    assert.ok(Math.abs(d.kcal - c[0]) <= 0.05 * c[0] && Math.abs(d.protein - c[1]) <= 10, label);
+  });
+  assert.ok(used >= 10, 'the custom foods are used');
+});
+
+test('generatePlan reaches the published limits when the same foods allow it (finding 16)', function () {
+  // the descent aims inside the limits (3.5 %, 7 g) one step at a time and stopped at protein −10.8 g, although
+  // 5 g more oats met every rule; the repair moves one or two items to any portion, scored against 5 % and 10 g
+  const liked = ['eggs', 'skyr', 'kidney_beans', 'rice_basmati', 'oats', 'bell_pepper', 'carrots', 'courgette', 'strawberries', 'orange', 'chia'];
+  const T = { kcal: 1800, protein: 180, fat: 51, carbs: 155.25 };
+  assertPlanMeetsRules(gen({ liked: liked, targets: T, mealsPerDay: 3 }), F, T, allowedSet(liked), 'finding 16');
 });
 
 test('unmeetable input: empty liked list still returns a well-formed plan with warnings', function () {
@@ -409,6 +478,46 @@ test('checkPlan reports every broken rule', function () {
   has(/^Only 1 different vegetable/);
   has(/^No fruit/);
   has(/^Fat /);
+});
+
+test('checkPlan reports fat more than 20 % above its target (finding 14)', function () {
+  const fat = totals(BASE, F).day.fat;
+  const fatIssues = function (targetFat) {
+    return M.checkPlan(BASE, F, Object.assign({}, T0, { fat: targetFat })).issues.filter(function (w) { return /^Fat /.test(w); });
+  };
+  assert.deepEqual(fatIssues(fat), []);
+  assert.deepEqual(fatIssues(fat / 1.2), [], 'exactly +20 % is within the limit');
+  assert.deepEqual(fatIssues(fat / 1.25), ['Fat 57 g is 25 % above the 45 g target (limit +20 %): leaner foods, or more room for carbs ' +
+    '(more meals per day), would bring it down.']);
+  assert.match(fatIssues(fat / 1.203)[0], / is 20\.3 % above /);
+});
+
+test('checkPlan warnings never round onto the limit they report (finding 39)', function () {
+  const d = totals(BASE, F).day;
+  const issue = function (re, targets) {
+    return M.checkPlan(BASE, F, Object.assign({}, T0, targets)).issues.filter(function (w) { return re.test(w); });
+  };
+  // before: 'Protein 165 g vs target 155 g (+10 g, limit ±10 g).' and 'Fibre 25 g is below 25 g'
+  const pr = issue(/^Protein /, { protein: d.protein - 10.04 });
+  assert.equal(pr.length, 1);
+  assert.match(pr[0], /^Protein 183\.71 g vs target 173\.67 g \(\+10\.04 g, limit ±10 g\)\.$/);
+  assert.match(issue(/^Protein /, { protein: d.protein + 10.4 })[0], /^Protein 183\.7 g vs target 194\.1 g \(−10\.4 g, limit ±10 g\)\.$/);
+  assert.match(issue(/^Protein /, { protein: d.protein + 25 })[0], /^Protein 184 g vs target 209 g \(−25 g, limit ±10 g\)\.$/);
+  assert.match(issue(/^Calories /, { kcal: d.kcal / 1.0504 })[0], /\(\+5\.04 %, limit ±5 %\)\.$/);
+  assert.match(issue(/^Calories /, { kcal: d.kcal / 0.9 })[0], /^Calories 2407 kcal vs target 2675 \(−10 %, limit ±5 %\)\.$/);
+  const lowFibre = { mealsPerDay: 3, targets: T0, warnings: [], meals: [
+    { key: 'breakfast', name: 'Breakfast', share: 0.5, items: [{ foodId: 'oats', role: 'carb', grams: 100 }] },
+    { key: 'lunch', name: 'Lunch', share: 0.5, items: [{ foodId: 'broccoli', role: 'produce', grams: 480 }] }
+  ] };
+  assert.ok(M.checkPlan(lowFibre, F, T0).issues.indexOf('Fibre 24.9 g is below 25 g: like more vegetables, fruit or wholegrain carbs.') >= 0);
+  // the helper the UI uses for its own summary rows
+  assert.equal(M.limitDecimals(10.035, 10), 2);
+  assert.equal(M.limitDecimals(24.74, 25), 1);
+  assert.equal(M.limitDecimals(-10.4, -10), 1);
+  assert.equal(M.limitDecimals(12, 10), 0);
+  assert.equal(M.limitDecimals(-13.2, -10), 0);
+  assert.equal(M.limitDecimals(10, 10), 0);
+  assert.equal(M.limitDecimals(10.0000001, 10), 7);
 });
 
 // ---------- rescalePlan ----------
@@ -511,7 +620,18 @@ test('rescalePlan: maintenance break adds the whole deficit as carbs and returns
     const up = M.rescalePlan(base, F, brk);
     sameShape(up.plan, base);
     const chkUp = M.checkPlan(up.plan, F, brk);
-    assert.ok(chkUp.ok, c + ' break: ' + chkUp.issues.join(' | '));
+    // with 3 meals the carb items cannot hold the break within their maximum: they stretch (≤ 1.25 ×, reported)
+    // rather than the energy going into oil and nuts (finding 14)
+    const stretched = chkUp.issues.filter(function (w) { return /per-meal maximum/.test(w); });
+    assert.deepEqual(chkUp.issues.filter(function (w) { return stretched.indexOf(w) < 0; }), [], c + ' break');
+    assert.ok(c[0] === 3 || !stretched.length, c + ' break: ' + stretched.join(' | '));
+    up.plan.meals.forEach(function (m) {
+      m.items.forEach(function (it) {
+        const max = F[it.foodId].maxPerMeal;
+        assert.ok(it.grams <= (it.role === 'carb' ? 1.25 * max : max), c + ' ' + it.foodId + ' ' + it.grams);
+      });
+    });
+    assert.ok(totals(up.plan, F).day.fat <= 1.2 * brk.fat, c + ' fat ' + totals(up.plan, F).day.fat.toFixed(1));
     assert.ok(itemsByRole(base, 'carb').every(function (x) { return gramsAt(up.plan, x) >= x.it.grams; }), 'carb portions scaled up');
     assert.ok(itemsByRole(base, 'carb').some(function (x) { return gramsAt(up.plan, x) > x.it.grams; }));
     const down = M.rescalePlan(up.plan, F, cut);
@@ -549,17 +669,78 @@ test('rescalePlan: once carbs reach their minimum, fat items take the rest of a 
   assert.ok(r.plan.warnings.some(function (w) { return /^(Calories|Protein) /.test(w); }), 'unreachable target is reported');
 });
 
-test('rescalePlan: an increase moves fat items only after every carb item is at its maximum', function () {
+test('rescalePlan: an increase the carb items cannot hold stretches them (≤ 1.25 × maximum) before fat takes the rest', function () {
   const T = targetsFor(3000, 185);
   const base = gen({ targets: T, mealsPerDay: 3 });
-  const T1 = Object.assign({}, T, { kcal: T.kcal + 600, carbs: T.carbs + 150 });
-  const r = M.rescalePlan(base, F, T1);
-  const fatMoved = itemsByRole(base, 'fat').some(function (x) { return gramsAt(r.plan, x) !== x.it.grams; });
-  assert.ok(fatMoved, 'this case needs more than the carb items can hold');
+  const stretchCap = function (id) { const f = F[id], s = f.unit ? f.unit.grams : 5; return Math.floor(1.25 * f.maxPerMeal / s + 1e-9) * s; };
+  itemsByRole(base, 'carb').forEach(function (x) { assert.equal(x.it.grams, F[x.it.foodId].maxPerMeal, 'base carb ' + x.it.foodId + ' at max'); });
+  // +300 kcal: the carb items stretch and fat items stay (the day's fat is already ~10 % above target); before the
+  // fix oil and nuts took the energy (finding 14)
+  const T1 = Object.assign({}, T, { kcal: T.kcal + 300, carbs: T.carbs + 75 });
+  const r1 = M.rescalePlan(base, F, T1);
   itemsByRole(base, 'carb').forEach(function (x) {
-    assert.equal(gramsAt(r.plan, x), F[x.it.foodId].maxPerMeal, x.it.foodId + ' at max');
+    const g = gramsAt(r1.plan, x);
+    assert.ok(g >= x.it.grams && g <= stretchCap(x.it.foodId), x.it.foodId + ' ' + g);
   });
-  itemsByRole(base, 'fat').forEach(function (x) { assert.ok(gramsAt(r.plan, x) >= x.it.grams); });
+  assert.ok(itemsByRole(base, 'carb').some(function (x) { return gramsAt(r1.plan, x) > F[x.it.foodId].maxPerMeal; }));
+  itemsByRole(base, 'fat').forEach(function (x) { assert.equal(gramsAt(r1.plan, x), x.it.grams, x.it.foodId); });
+  const c1 = M.checkPlan(r1.plan, F, T1);
+  assert.ok(Math.abs(c1.kcalDiffPct) <= 5 && Math.abs(c1.proteinDiffG) <= 10, c1.issues.join(' | '));
+  assert.ok(c1.issues.length > 0);
+  c1.issues.forEach(function (w) { assert.match(w, /is above the \d+ g per-meal maximum \(more meals per day would spread it\)\.$/); });
+  // +600 kcal: every carb item reaches its stretched maximum before the fat items grow
+  const T2 = Object.assign({}, T, { kcal: T.kcal + 600, carbs: T.carbs + 150 });
+  const r2 = M.rescalePlan(base, F, T2);
+  itemsByRole(base, 'carb').forEach(function (x) { assert.equal(gramsAt(r2.plan, x), stretchCap(x.it.foodId), x.it.foodId); });
+  const fats = itemsByRole(base, 'fat');
+  assert.ok(fats.every(function (x) { return gramsAt(r2.plan, x) >= x.it.grams; }));
+  assert.ok(fats.some(function (x) { return gramsAt(r2.plan, x) > x.it.grams; }), 'fat items took the rest');
+});
+
+test('rescalePlan: a 3-meal maintenance break goes to carbs, not oil and nuts, and stays on target (finding 14)', function () {
+  // the example user (85 kg, 3 meals): cut targets of week 1 → break targets of week 9
+  const cut = { kcal: 1971.7142857142858, protein: 183.6, fat: 51, carbs: 194.57857142857142 };
+  const brk = { kcal: 2906.714285714286, protein: 183.6, fat: 51, carbs: 428.3285714285714 };
+  const base = gen({ targets: cut, mealsPerDay: 3 });
+  const r = M.rescalePlan(base, F, brk);
+  const b = totals(base, F).day, d = totals(r.plan, F).day;
+  // before: fat 83 g (+63 %, peanut butter, oil and almonds grown, no warning), carbs 325 g of 428 g
+  assert.ok(Math.abs(d.kcal - brk.kcal) <= 0.05 * brk.kcal, 'kcal ' + d.kcal.toFixed(0));
+  assert.ok(d.fat <= 1.2 * brk.fat, 'fat ' + d.fat.toFixed(1));
+  assert.ok((d.carbs - b.carbs) * 4 >= 0.75 * (d.kcal - b.kcal), 'most of the added energy is carbs');
+  itemsByRole(base, 'fat').forEach(function (x) { assert.ok(gramsAt(r.plan, x) <= x.it.grams + 5, x.it.foodId); });
+  assert.ok(r.plan.warnings.length > 0);
+  r.plan.warnings.forEach(function (w) { assert.match(w, /per-meal maximum/); });
+});
+
+test('rescalePlan: a routine −200 kcal check-in keeps protein within ±10 g when the same foods allow it (finding 15)', function () {
+  const liked = ['ham_lean', 'mozzarella_light', 'milk_semi', 'lentils_red', 'quinoa', 'rice_cakes', 'bread_wholemeal', 'witloof', 'carrots',
+    'strawberries', 'chia', 'almonds'];
+  const T = targetsFor(2000, 205);
+  const base = gen({ liked: liked, targets: T, mealsPerDay: 3 });
+  assert.deepEqual(base.warnings, []);
+  const T1 = Object.assign({}, T, { kcal: T.kcal - 200, carbs: T.carbs - 50 });
+  const r = M.rescalePlan(base, F, T1);
+  sameShape(r.plan, base);
+  // before: 'Protein 189 g vs target 205 g (−15.6 g)': the protein foods are at their maximum, so the day keeps
+  // more of the protein-rich lentils instead and sits higher in the kcal band
+  const c = M.checkPlan(r.plan, F, T1);
+  assert.ok(c.ok, c.issues.join(' | '));
+});
+
+test('rescalePlan keeps fibre ≥ 25 g by growing produce when a cut removes fibrous carbs (finding 17)', function () {
+  const liked = ['ham_lean', 'milk_skim', 'pasta', 'rice_cakes', 'carrots', 'tomatoes', 'courgette', 'kiwi', 'apple', 'walnuts'];
+  const T = { kcal: 1900, protein: 160, fat: 46, carbs: 212 };
+  const base = gen({ liked: liked, targets: T });
+  assert.deepEqual(base.warnings, []);
+  const T1 = { kcal: 1700, protein: 160, fat: 46, carbs: 162 };
+  const r = M.rescalePlan(base, F, T1);
+  const c = M.checkPlan(r.plan, F, T1);
+  assert.ok(c.ok, c.issues.join(' | '));            // before: 'Fibre 24 g is below 25 g' (23.9 g)
+  const produce = itemsByRole(base, 'produce');
+  assert.ok(produce.every(function (x) { return gramsAt(r.plan, x) >= x.it.grams; }));
+  assert.ok(produce.some(function (x) { return gramsAt(r.plan, x) > x.it.grams; }), 'produce grew');
+  assert.deepEqual(r.changes, expectedChanges(base, r.plan));
 });
 
 // ---------- swapCandidates / swapFood ----------
@@ -620,7 +801,11 @@ test('swapFood: only the swapped meal changes and the day stays within tolerance
         assert.equal(F[id].category, F[it.foodId].category);
         assert.equal(p.meals[mi].items.length, m.items.length);
         assert.deepEqual(p.targets, BASE.targets);
-        assertPlanMeetsRules(p, F, T0, allowedSet(LIKED), label);
+        // a fattier food (egg whites → whole eggs) can take the day's fat past +20 %: that is reported
+        const fatHigh = p.warnings.filter(function (w) { return /^Fat .* above the .* target/.test(w); });
+        if (fatHigh.length) assert.ok(F[id].fat > F[it.foodId].fat, label);
+        assertPlanMeetsRules(Object.assign({}, p, { warnings: p.warnings.filter(function (w) { return fatHigh.indexOf(w) < 0; }) }), F, T0,
+          allowedSet(LIKED), label);
         // re-solved towards the meal's previous totals
         const a = totals(BASE, F).meals[m.key], b = totals(p, F).meals[m.key];
         assert.ok(Math.abs(b.kcal - a.kcal) <= 0.12 * a.kcal, label + ' meal kcal ' + a.kcal.toFixed(0) + ' → ' + b.kcal.toFixed(0));
@@ -660,4 +845,99 @@ test('swapFood rejects foods that are not candidates', function () {
   assert.throws(function () { M.swapFood(BASE, F, LIKED, [], 'lunch', pIdx, 'potatoes'); }, /not a valid replacement/);   // other category
   assert.throws(function () { M.swapFood(BASE, F, LIKED, ['chicken_breast'], 'lunch', pIdx, 'chicken_breast'); });    // excluded
   assert.throws(function () { M.swapFood(BASE, F, LIKED, [], 'lunch', pIdx, 'salmon'); });                           // not liked
+});
+
+test('swapFood re-solves the meal to a valid day when the same foods allow it (finding 16)', function () {
+  const liked = ['eggs', 'cod', 'chicken_slices', 'whey', 'potatoes', 'kidney_beans', 'rice_cakes', 'green_beans', 'red_cabbage', 'courgette',
+    'tomatoes', 'blueberries', 'frozen_berries'];
+  const T = { kcal: 2400, protein: 180, fat: 58.67, carbs: 288 };
+  const plan = gen({ liked: liked, targets: T });
+  assert.deepEqual(plan.warnings, []);
+  const idx = plan.meals[0].items.findIndex(function (it) { return it.foodId === 'chicken_slices'; });
+  const p = M.swapFood(plan, F, liked, [], 'breakfast', idx, 'eggs');
+  // before: eggs 220 g + rice cakes 48 g left protein at −13 g; one more egg for four fewer rice cakes is valid
+  // (whole eggs in three meals do take fat well above its target, which is reported)
+  assert.deepEqual(p.warnings.map(function (w) { return w.slice(0, 11); }), ['Fat 81 g is']);
+  assertPlanMeetsRules(Object.assign({}, p, { warnings: [] }), F, T, allowedSet(liked), 'chicken slices → eggs');
+  p.meals.forEach(function (m, j) { if (j > 0) assert.deepStrictEqual(m, plan.meals[j]); });
+});
+
+// ---------- replaceDisallowed ----------
+function mealOf(plan, key) { return plan.meals.filter(function (m) { return m.key === key; })[0]; }
+function indexOf(plan, key, foodId) { return mealOf(plan, key).items.findIndex(function (it) { return it.foodId === foodId; }); }
+
+test('replaceDisallowed: an excluded food is swapped in its meal only, preferring a food not yet in the day (finding 0)', function () {
+  const before = clone(BASE);
+  const lunchIdx = indexOf(BASE, 'lunch', 'cod');
+  assert.ok(lunchIdx >= 0);
+  const r = M.replaceDisallowed(BASE, F, LIKED, ['cod']);
+  assert.deepStrictEqual(BASE, before, 'input not mutated');
+  assert.deepStrictEqual(M.replaceDisallowed(BASE, F, LIKED, ['cod']), r, 'deterministic');
+  // turkey ranks first but is already dinner's protein: chicken breast is the best food not yet in the day
+  assert.deepEqual(r.replaced, [{ mealKey: 'lunch', itemIndex: lunchIdx, from: 'cod', to: 'chicken_breast' }]);
+  assert.deepEqual(r.dropped, []);
+  assert.deepEqual(r.impossible, []);
+  assert.equal(r.plan.meals[1].items[lunchIdx].role, 'protein');
+  r.plan.meals.forEach(function (m, j) { if (m.key !== 'lunch') assert.deepStrictEqual(m, BASE.meals[j]); });
+  assertPlanMeetsRules(r.plan, F, T0, allowedSet(LIKED, ['cod']), 'cod excluded');
+  // same for a food that is simply no longer liked, and nothing to do when every food is allowed
+  const unliked = LIKED.filter(function (id) { return id !== 'potatoes'; });
+  const r2 = M.replaceDisallowed(BASE, F, unliked, []);
+  assert.equal(r2.replaced.length, 1);
+  assert.equal(F[r2.replaced[0].to].category, 'carb');
+  assertPlanMeetsRules(r2.plan, F, T0, allowedSet(unliked), 'potatoes un-liked');
+  const none = M.replaceDisallowed(BASE, F, LIKED, []);
+  assert.deepStrictEqual(none.plan, BASE);
+  assert.deepEqual([none.replaced, none.dropped, none.impossible], [[], [], []]);
+});
+
+test('replaceDisallowed: vegetables are replaced so the day keeps 2 different ones', function () {
+  const r = M.replaceDisallowed(BASE, F, LIKED, ['broccoli', 'green_beans']);
+  assert.equal(r.replaced.length, 2);
+  assert.deepEqual(r.impossible, []);
+  assertPlanMeetsRules(r.plan, F, T0, allowedSet(LIKED, ['broccoli', 'green_beans']), 'vegetables excluded');
+});
+
+test('replaceDisallowed: a deleted custom food (unknown id) is replaced by a food of the same role (finding 19)', function () {
+  const seitan = { id: 'custom_seitan', name: 'Seitan', category: 'protein', kcal: 120, protein: 25, carbs: 4, fat: 1.5, fibre: 0.5, unit: null, custom: true };
+  const liked = LIKED.filter(function (id) { return id !== 'cod' && id !== 'turkey_breast'; });
+  const plan = gen({ foods: foods.byId(foods.FOODS.concat([seitan])), liked: liked.concat([seitan.id]), targets: T0 });
+  const key = plan.meals.filter(function (m) { return m.items.some(function (it) { return it.foodId === seitan.id; }); })[0].key;
+  const idx = indexOf(plan, key, seitan.id);
+  // after the delete the food is gone from the map; swap candidates are offered by role
+  const cands = M.swapCandidates(plan, F, liked, [], key, idx);
+  assert.ok(cands.length > 0 && cands.every(function (id) { return M.normalizeFood(F[id]).slots.indexOf('protein') >= 0; }));
+  const r = M.replaceDisallowed(plan, F, liked, []);
+  assert.deepEqual(r.replaced.map(function (x) { return [x.mealKey, x.itemIndex, x.from]; }), [[key, idx, seitan.id]]);
+  assert.ok(cands.indexOf(r.replaced[0].to) >= 0);
+  assertPlanMeetsRules(r.plan, F, T0, allowedSet(liked), 'custom food deleted');
+});
+
+test('replaceDisallowed: an item without a candidate is dropped when its meal keeps its roles, else reported', function () {
+  // no main-meal fat left: the olive oil items go and their meals are re-solved (energy moves to the carbs)
+  const noOil = LIKED.filter(function (id) { return id !== 'olive_oil' && id !== 'almonds'; });
+  const oil = ['lunch', 'dinner'].map(function (k) { return { mealKey: k, itemIndex: indexOf(BASE, k, 'olive_oil'), foodId: 'olive_oil' }; });
+  const r = M.replaceDisallowed(BASE, F, noOil, []);
+  assert.deepEqual(r.replaced, []);
+  assert.deepEqual(r.dropped, oil);
+  assert.deepEqual(r.impossible, []);
+  ['lunch', 'dinner'].forEach(function (k) {
+    const m = mealOf(r.plan, k), b = mealOf(BASE, k);
+    assert.equal(m.items.length, b.items.length - 1);
+    assert.ok(m.items.every(function (it) { return it.role !== 'fat'; }));
+    m.items.filter(function (it) { return it.role === 'produce'; }).forEach(function (it) {
+      assert.equal(it.grams, b.items.filter(function (x) { return x.foodId === it.foodId; })[0].grams, 'vegetables do not chase the lost fat');
+    });
+  });
+  const d = totals(r.plan, F).day;
+  assert.ok(Math.abs(d.kcal - T0.kcal) <= 0.05 * T0.kcal && Math.abs(d.protein - T0.protein) <= 10);
+  assert.ok(r.plan.warnings.every(function (w) { return /^Fat /.test(w); }), r.plan.warnings.join(' | '));
+  // the only protein food excluded: nothing can replace it and a meal cannot lose its protein → impossible
+  const liked = ['egg_whites', 'bread_wholemeal', 'broccoli', 'carrots', 'apple', 'almonds'];
+  const plan = gen({ liked: liked, targets: targetsFor(2200, 160), mealsPerDay: 3 });
+  const r2 = M.replaceDisallowed(plan, F, liked, ['egg_whites']);
+  assert.deepEqual(r2.replaced, []);
+  assert.deepEqual(r2.dropped, []);
+  assert.deepEqual(r2.impossible, plan.meals.map(function (m) { return { mealKey: m.key, itemIndex: indexOf(plan, m.key, 'egg_whites'), foodId: 'egg_whites' }; }));
+  assert.deepStrictEqual(r2.plan.meals, plan.meals);
 });

@@ -116,9 +116,11 @@
             return { ean: r.ean || '', product: r.product || '', pack_size_g: isNum(r.packSizeG) ? r.packSizeG : null, url: r.url || '' };
           });
         });
+        // drained_ratio / g_per_ml let the price script put a label's net weight or volume on the food's basis.
         return {
           food_id: q.foodId, food: f.name || q.foodId, food_nl: f.nameNl || '', weekly_g: Math.round(q.grams),
-          unit_g: f.unit ? f.unit.grams : null, stores: stores
+          unit_g: f.unit ? f.unit.grams : null, drained_ratio: isNum(f.drainedRatio) ? f.drainedRatio : null,
+          g_per_ml: isNum(f.gPerMl) ? f.gPerMl : null, stores: stores
         };
       })
     };
@@ -132,6 +134,10 @@
       .replace(/\s+/g, ' ')
       .trim();
   }
+
+  // Barcodes compare without spaces and leading zeros: the GTIN-14, EAN-13 and UPC-12 forms of one product differ
+  // only in leading zeros.
+  function eanKey(ean) { return String(ean == null ? '' : ean).replace(/\s+/g, '').replace(/^0+/, ''); }
 
   function canonicalStore(s) {
     const n = normalizeName(s);
@@ -174,7 +180,11 @@
       const ean = r.ean == null ? '' : String(r.ean).replace(/\s+/g, '').trim();
       const product = r.product == null ? '' : String(r.product).trim();
       if (!ean && !product) { errors.push(at + 'needs an ean or a product name'); return; }
-      rows.push({ store: store, ean: ean, product: product, pack_size_g: pack, price_eur: price, promo: r.promo === true || r.promo === 'true', date: date });
+      const out = { store: store, ean: ean, product: product, pack_size_g: pack, price_eur: price, promo: r.promo === true || r.promo === 'true', date: date };
+      // Optional: the product-table name the row should match, when "product" is the store's (newer) name.
+      const matchProduct = r.match_product == null ? '' : String(r.match_product).trim();
+      if (matchProduct) out.match_product = matchProduct;
+      rows.push(out);
     });
     return { rows: rows, errors: errors };
   }
@@ -185,11 +195,13 @@
     const unmatched = [];
     const updatedIds = {};
     (rows || []).forEach(function (row) {
+      const key = eanKey(row.ean);
       let hits = [];
-      if (row.ean) hits = out.filter(function (p) { return p.store === row.store && p.ean && String(p.ean).replace(/\s+/g, '') === row.ean; });
-      if (!hits.length && row.product) {
-        const n = normalizeName(row.product);
-        hits = out.filter(function (p) { return p.store === row.store && normalizeName(p.product) === n; });
+      if (key) hits = out.filter(function (p) { return p.store === row.store && eanKey(p.ean) === key; });
+      // Then the table's name (match_product), then the store's name; the row then takes the store's name.
+      const names = [row.match_product, row.product].map(normalizeName).filter(Boolean);
+      for (let i = 0; !hits.length && i < names.length; i++) {
+        hits = out.filter(function (p) { return p.store === row.store && normalizeName(p.product) === names[i]; });
       }
       if (!hits.length) { unmatched.push(row); return; }
       hits.forEach(function (p) {
@@ -210,6 +222,22 @@
     };
   }
 
+  // Unmatched rows kept for mapping: one entry per store + barcode (store + normalised name without a barcode).
+  // The newest row wins: an incoming row replaces an entry unless its date is older.
+  function mergeUnmatched(existing, incoming) {
+    const out = [];
+    const at = {};
+    (existing || []).concat(incoming || []).forEach(function (r) {
+      if (!r || typeof r !== 'object') return;
+      const e = eanKey(r.ean);
+      const k = r.store + '|' + (e ? 'ean:' + e : 'name:' + normalizeName(r.product));
+      if (!(k in at)) { at[k] = out.length; out.push(r); return; }
+      const old = out[at[k]];
+      if (!(old.date && r.date && r.date < old.date)) out[at[k]] = r;
+    });
+    return out;
+  }
+
   function mapImportRow(products, row, foodId) {
     const list = (products || []).slice();
     const base = String(row.store).toLowerCase() + '-' + foodId + '-' + (row.ean || 'n');
@@ -226,7 +254,7 @@
   const api = {
     STORES: STORES, mealOccurrences: mealOccurrences, weeklyQuantities: weeklyQuantities, packsFor: packsFor, isStale: isStale,
     storeBreakdown: storeBreakdown, buildExport: buildExport, parseImport: parseImport, applyImport: applyImport,
-    mapImportRow: mapImportRow, normalizeName: normalizeName, canonicalStore: canonicalStore
+    mergeUnmatched: mergeUnmatched, mapImportRow: mapImportRow, normalizeName: normalizeName, canonicalStore: canonicalStore
   };
 
   if (typeof module === 'object' && module.exports) module.exports = api;

@@ -6,7 +6,9 @@
  *  - Carrefour rows are unverified typical shelf names (the search budget ran out), except quinoa (from OFF).
  *  - Every price is an estimate or a search-result price with an unknown date (source 'seed'), and no row has
  *    a price date, so the app flags them all "run price script" until real prices are imported.
- * Pack sizes are grams: eggs = count × 55 g, liquids 1 ml = 1 g, oil 0.92 g/ml, loose produce per kg = 1000 g.
+ * Pack sizes are grams: eggs = count × 55 g, liquids 1 ml = 1 g, oil 0.92 g/ml, loose produce per kg = 1000 g,
+ * canned tuna and legumes = drained weight (their macros are per drained gram; a net weight is converted with the
+ * food's drainedRatio in foods.js and the net size is kept in the note).
  * Edit any row in the Groceries tab; this file only seeds a fresh install or "Reset table".
  */
 (function (root) {
@@ -123,7 +125,7 @@
     "date": null,
     "source": "estimate",
     "url": "https://www.colruyt.be/nl/producten/11510",
-    "note": "Pack: 95 g. Price is an estimate. The 95 g is probably the drained weight; the Collect&Go URL slug says '95-100g'. Non-MSC version: colruyt.be/nl/producten/9818. The budget brand EVERYDAY tonijn in eigen nat (10950) also exists. Price is an estimate."
+    "note": "Pack: 95 g drained (net can size unknown). Price is an estimate. The 95 g is probably the drained weight; the Collect&Go URL slug says '95-100g'. Non-MSC version: colruyt.be/nl/producten/9818. The budget brand EVERYDAY tonijn in eigen nat (10950) also exists. Price is an estimate."
   },
   {
     "id": "colruyt-scampi",
@@ -1083,13 +1085,13 @@
     "foodId": "tuna_water",
     "product": "365 | Delhaize | Tonijn | Eigen nat | 3 x 150 gr",
     "ean": "",
-    "packSizeG": 450,
+    "packSizeG": 315,
     "price": 5.49,
     "promo": false,
     "date": null,
     "source": "estimate",
     "url": "https://www.delhaize.be/nl/shop/Conserven/Vis-in-conserve/Tonijn-in-conserve/Tonijn-Eigen-nat/p/S2016122303681970099",
-    "note": "Pack: 3 x 150 gr. Price is an estimate. packSizeG is net weight. The drained weight is lower (about 3 x 100-110 g). A smaller alternative is 'Delhaize | Tonijn | Natuur | 3 x 56 gr'."
+    "note": "Pack: 3 x 150 gr net (packSizeG 315 g = drained weight, net × 0.7; about 3 x 105 g). Price is an estimate. A smaller alternative is 'Delhaize | Tonijn | Natuur | 3 x 56 gr'."
   },
   {
     "id": "delhaize-scampi",
@@ -1475,13 +1477,13 @@
     "foodId": "chickpeas",
     "product": "Delhaize | Kikkererwten",
     "ean": "",
-    "packSizeG": 400,
+    "packSizeG": 240,
     "price": 0.99,
     "promo": false,
     "date": null,
     "source": "estimate",
     "url": "https://www.delhaize.be/nl/shop/Conserven/Groenten-in-conserve/Linzen-bonen-en-andere-peulvruchten-in-conserve/Kikkererwten-in-conserve/Kikkererwten/p/S2010100400116770000",
-    "note": "Pack: 400 g. Price is an estimate. Can size unverified (the drained weight is about 60% of net). The organic version 'Kikkererwten / Pois Chiches - Delhaize Bio - 350 g' has OFF EAN 5400113754831."
+    "note": "Pack: 400 g net (packSizeG 240 g = drained weight, net × 0.6). Price is an estimate. Can size unverified. The organic version 'Kikkererwten / Pois Chiches - Delhaize Bio - 350 g' has OFF EAN 5400113754831."
   },
   {
     "id": "delhaize-kidney_beans",
@@ -1489,13 +1491,13 @@
     "foodId": "kidney_beans",
     "product": "Delhaize | Bonen | Rode | Kidney | 250 gr",
     "ean": "",
-    "packSizeG": 250,
+    "packSizeG": 150,
     "price": 0.89,
     "promo": false,
     "date": null,
     "source": "estimate",
     "url": "https://www.delhaize.be/nl/shop/Conserven/Groenten-in-conserve/Linzen-bonen-en-andere-peulvruchten-in-conserve/Bonen-in-conserve/Bonen-Rode-Kidney/p/S2023113000733540000",
-    "note": "Pack: 250 gr. Price is an estimate. 250 gr is from the shelf title. It may be the drained weight."
+    "note": "Pack: 250 gr net (packSizeG 150 g = drained weight, net × 0.6). Price is an estimate. 250 gr is from the shelf title, read as the net weight like Delhaize's other can titles; it may be the drained weight."
   },
   {
     "id": "delhaize-lentils_red",

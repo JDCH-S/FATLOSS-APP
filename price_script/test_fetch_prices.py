@@ -1,5 +1,6 @@
 """Tests for fetch_prices.py (standard library only): python3 -m unittest discover -s price_script"""
 
+import http.client
 import json
 import os
 import sys
@@ -129,7 +130,7 @@ class MatchingTests(unittest.TestCase):
         with_ean = fp.price_row("Colruyt", c, {"ean": "5400141044429", "product": "old name", "pack_size_g": 450}, "2026-10-02")
         self.assertEqual((with_ean["ean"], with_ean["product"]), ("5400141044429", "Boni Skyr natuur"))
         no_ean = fp.price_row("Colruyt", c, {"ean": "", "product": "Boni Skyr natuur 500 g"}, "2026-10-02")
-        self.assertEqual((no_ean["ean"], no_ean["product"]), ("5400141044429", "Boni Skyr natuur 500 g"))
+        self.assertEqual((no_ean["ean"], no_ean["product"], no_ean["match_product"]), ("5400141044429", "Boni Skyr natuur", "Boni Skyr natuur 500 g"))
         disc = fp.price_row("Carrefour", dict(c, pack_size_g=None), None, "2026-10-02")
         self.assertEqual(disc["product"], "Boni Skyr natuur")
         self.assertIsNone(disc["pack_size_g"])
@@ -141,7 +142,8 @@ class MatchingTests(unittest.TestCase):
         skyr, eggs = rows
         self.assertEqual(skyr, {"store": "Colruyt", "ean": "5400141044429", "product": "Boni Skyr natuur", "pack_size_g": 500.0,
                                 "price_eur": 2.49, "promo": False, "date": "2026-10-02"})
-        self.assertEqual(eggs["product"], "Boni vrije uitloop eieren (10 st)", "name kept so the app's name match hits")
+        self.assertEqual(eggs["product"], "BONI vrije uitloop eieren", "the store's name")
+        self.assertEqual(eggs["match_product"], "Boni vrije uitloop eieren (10 st)", "the table's name, for the app's match")
         self.assertEqual(eggs["pack_size_g"], 550)
         self.assertTrue(eggs["promo"])
         self.assertTrue(any("Skyr" in line for line in report))
@@ -283,6 +285,131 @@ class ApiAndCliTests(unittest.TestCase):
                 self.assertEqual(fp.main([exp, "--dry-run"]), 0)
             printed = "\n".join(str(c.args[0]) for c in p.call_args_list if c.args)
             self.assertIn("Boni Skyr natuur", printed)
+
+
+
+def _write(path, data):
+    with open(path, "w", encoding="utf-8") as fh:
+        json.dump(data, fh)
+
+
+class ReviewFindingTests(unittest.TestCase):
+    def test_canned_and_oil_pack_sizes_use_the_food_basis(self):
+        # Finding 7: the food macros for canned tuna and legumes are per drained gram, oil is 0.92 g/ml.
+        self.assertEqual(fp.normalize_item({"name": "Carrefour Kikkererwten 400 g", "price": 0.99}, drained_ratio=0.6)["pack_size_g"], 240)
+        self.assertEqual(fp.normalize_item({"name": "Tonijn | Eigen nat | 3 x 150 gr", "price": 5.49}, drained_ratio=0.7)["pack_size_g"], 315)
+        self.assertEqual(fp.normalize_item({"name": "Olijfolie extra vierge", "size": "1 l", "price": 8.99}, g_per_ml=0.92)["pack_size_g"], 920)
+        self.assertEqual(fp.normalize_item({"name": "Olijfolie 500 g", "price": 4.99}, g_per_ml=0.92)["pack_size_g"], 500, "mass needs no density")
+        self.assertEqual(fp.parse_pack_size("1 L"), 1000, "other liquids stay 1 ml = 1 g")
+        export = {"items": [{"food_id": "chickpeas", "food": "Chickpeas", "food_nl": "Kikkererwten", "unit_g": None, "drained_ratio": 0.6,
+                             "g_per_ml": None, "weekly_g": 1400,
+                             "stores": {"Carrefour": [{"ean": "", "product": "Kikkererwten", "pack_size_g": 240, "url": ""}]}}]}
+        raw = [{"searchTerm": "Kikkererwten", "name": "Carrefour Kikkererwten", "size": "400 g", "price": 0.89}]
+        rows, _ = fp.match_store(export, "Carrefour", raw, "2026-10-02")
+        self.assertEqual(rows[0]["pack_size_g"], 240)
+
+    def test_ean_less_rows_send_the_store_name_and_match_product(self):
+        # Finding 8: the app matches on match_product, then shows the store's own name for the price it stores.
+        export = {"items": [{"food_id": "peanut_butter", "food": "Peanut butter", "food_nl": "Pindakaas 100%", "unit_g": None, "weekly_g": 200,
+                             "stores": {"Carrefour": [{"ean": "", "product": "Calvé Pindakaas 100% pinda's", "pack_size_g": 350, "url": ""}]}}]}
+        raw = [{"searchTerm": "Calvé Pindakaas 100% pinda's", "name": "Pindakaas 100% pinda's crunchy", "brand": "Carrefour Classic",
+                "price": "€ 2,19", "ean": "3560071012345", "size": "350 g"}]
+        rows, _ = fp.match_store(export, "Carrefour", raw, "2026-09-25")
+        self.assertEqual(rows, [{"store": "Carrefour", "ean": "3560071012345", "product": "Carrefour Classic Pindakaas 100% pinda's crunchy",
+                                 "match_product": "Calvé Pindakaas 100% pinda's", "pack_size_g": 350.0, "price_eur": 2.19, "promo": False,
+                                 "date": "2026-09-25"}])
+
+    def test_discovery_skips_hits_without_a_pack_size(self):
+        # Finding 9: the import format needs a number, so a hit without a pack size is reported, never written as null.
+        export = {"items": [{"food_id": "custom_pudding", "food": "Protein pudding", "food_nl": "Protein pudding", "unit_g": None, "weekly_g": 1400,
+                             "stores": {"Colruyt": [], "Delhaize": [], "Carrefour": []}}]}
+        raw = [{"searchTerm": "Protein pudding", "name": "EHRMANN High Protein pudding chocolade", "price": 1.49},
+               {"searchTerm": "Protein pudding", "name": "Alpro Protein pudding", "price": "1,99"}]
+        rows, report = fp.match_store(export, "Colruyt", raw, "2026-09-25", discover=1)
+        self.assertEqual(rows, [])
+        self.assertTrue(any("no pack size" in line and "Alpro Protein pudding" in line for line in report), report)
+        sized = raw + [{"searchTerm": "Protein pudding", "name": "Ehrmann pudding vanille", "price": 1.39, "size": "200 g"}]
+        rows, _ = fp.match_store(export, "Colruyt", sized, "2026-09-25", discover=1)
+        self.assertEqual([(r["product"], r["pack_size_g"]) for r in rows], [("Ehrmann pudding vanille", 200.0)])
+
+    def test_delhaize_s_codes_are_product_codes(self):
+        # Finding 10: 22 of the seeded Delhaize URLs use /p/S... codes.
+        url = "https://www.delhaize.be/nl/shop/Rijst/Rijst-Basmati/p/S2018100200120350000"
+        self.assertEqual(fp.store_code(url), "S2018100200120350000")
+        row = {"ean": "", "product": "Delhaize | Rijst | Basmati | 1 kg", "pack_size_g": 1000, "url": url}
+        cands = [{"ean": "", "product": "Delhaize Rijst | Basmati | Kookbuiltjes | 1 kg", "price_eur": 4.49, "pack_size_g": 1000,
+                  "url": "https://www.delhaize.be/nl/shop/Rijst/p/S2018100200120360000"},
+                 {"ean": "", "product": "Basmati rijst", "price_eur": 3.29, "pack_size_g": 1000, "url": url}]
+        c, _, how = fp.best_match(row, cands)
+        self.assertEqual((how, c["price_eur"]), ("product code", 3.29))
+
+    def test_gtin14_matches_ean13(self):
+        # Finding 37: a zero-padded GTIN-14 is the same product as the table's EAN-13.
+        cand = fp.normalize_item({"name": "BONI Skyr natuur 500g", "price": 1.29, "gtin": "05400141571738", "content": "500 g"})
+        c, _, how = fp.best_match({"ean": "5400141571738", "product": "BONI Skyr natuur 500g", "pack_size_g": 500}, [cand])
+        self.assertEqual((how, c["price_eur"]), ("ean", 1.29))
+        c, _, how = fp.best_match({"ean": "0012345678905", "product": "x"}, [dict(cand, ean="012345678905")])
+        self.assertEqual(how, "ean")
+        other, _, _ = fp.best_match({"ean": "5400141571739", "product": "BONI Skyr natuur 500g"}, [cand])
+        self.assertIsNone(other, "a different barcode still blocks the name match")
+
+
+class NetworkFailureTests(unittest.TestCase):
+    """Finding 11: timeouts, dropped connections and non-JSON bodies are ApifyErrors, so one store's failure never
+    loses the other stores' rows."""
+
+    @staticmethod
+    def _resp(body):
+        r = mock.MagicMock()
+        r.__enter__.return_value.read.return_value = body
+        return r
+
+    def test_get_is_retried_once_after_a_timeout(self):
+        with mock.patch.object(fp.urllib.request, "urlopen", side_effect=[TimeoutError("timed out"), self._resp(b'{"data": 1}')]) as op, \
+                mock.patch.object(fp.time, "sleep") as sleep:
+            self.assertEqual(fp._request("GET", "https://api.apify.com/v2/actor-runs/r1", "tok"), {"data": 1})
+        self.assertEqual(op.call_count, 2)
+        sleep.assert_called_once()
+
+    def test_failures_become_apify_errors(self):
+        cases = [http.client.RemoteDisconnected("Remote end closed connection without response"), ConnectionResetError(104, "reset"),
+                 self._resp(b"<html>Bad gateway</html>"), self._resp(b"\xff\xfe")]
+        for failure in cases:
+            with mock.patch.object(fp.urllib.request, "urlopen", side_effect=[failure, failure]) as op, mock.patch.object(fp.time, "sleep"):
+                with self.assertRaises(fp.ApifyError):
+                    fp._request("GET", "https://api.apify.com/v2/datasets/d1/items", "tok")
+            self.assertEqual(op.call_count, 2)
+
+    def test_post_is_never_retried(self):
+        # A retried POST could start (and bill) a second actor run.
+        with mock.patch.object(fp.urllib.request, "urlopen", side_effect=TimeoutError("timed out")) as op, mock.patch.object(fp.time, "sleep"):
+            with self.assertRaises(fp.ApifyError):
+                fp._request("POST", "https://api.apify.com/v2/acts/a~b/runs", "tok", {"x": 1})
+        self.assertEqual(op.call_count, 1)
+
+    def test_a_failing_store_keeps_the_other_stores_rows(self):
+        with tempfile.TemporaryDirectory() as d:
+            exp, raw, out = (os.path.join(d, n) for n in ("grocery.json", "colruyt.json", "prices.json"))
+            _write(exp, EXPORT)
+            _write(raw, COLRUYT_RAW)
+            dropped = http.client.RemoteDisconnected("Remote end closed connection without response")
+            with mock.patch.dict(os.environ, {"APIFY_TOKEN": "tok"}, clear=True), mock.patch("builtins.print"), \
+                    mock.patch.object(fp.urllib.request, "urlopen", side_effect=dropped), mock.patch.object(fp.time, "sleep"):
+                code = fp.main([exp, "-o", out, "--stores", "Colruyt,Delhaize", "--from-dataset", f"Colruyt={raw}", "--today", "2026-10-02"])
+            self.assertEqual(code, 1)
+            with open(out, encoding="utf-8") as fh:
+                self.assertEqual({r["store"] for r in json.load(fh)}, {"Colruyt"})
+
+    def test_run_timeout_names_the_dataset(self):
+        def fake(method, url, token, body=None, timeout=90):
+            if method == "POST":
+                return {"data": {"id": "run1", "defaultDatasetId": "ds9", "status": "RUNNING"}}
+            return {"data": {"status": "RUNNING"}}
+
+        with mock.patch.object(fp, "_request", side_effect=fake):
+            with self.assertRaises(fp.ApifyError) as ctx:
+                fp.run_actor("a/b", {}, "tok", timeout_s=0, log=lambda *a: None)
+        self.assertIn("ds9", str(ctx.exception))
 
 
 if __name__ == "__main__":

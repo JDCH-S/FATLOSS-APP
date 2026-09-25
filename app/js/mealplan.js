@@ -9,10 +9,15 @@
  *      squares, 3 unknowns, active sets enumerated), then round to 5 g / whole units;
  *   4. grow vegetable portions until fibre ≥ 25 g (re-solving the meal each time);
  *   5. day-level greedy correction: ±1 step moves scored by a weighted error, until no move improves;
- *   6. if the day still breaks a rule, try alternative foods (deterministic local search) and keep the best.
+ *   6. if the day still breaks a rule: repair (one or two items moved to any portion, scored against the
+ *      published limits), then alternative foods (deterministic local search) and a repair of the best choice.
  * rescalePlan keeps foods and meals: protein items follow a protein-target change, then the energy change goes to
- * carb items (shares proportional to their carb grams) and, once those hit their bounds, to fat items.
- * swapFood replaces one item and re-solves only that meal towards its previous totals.
+ * carb items (shares proportional to their carb grams) and, once those hit their bounds, to fat items (an increase
+ * the carbs cannot hold stretches them to 1.25 × their maximum once fat is 10 % above its target). Protein drift and
+ * fibre are then restored (protein items, produce) with the energy re-balanced through carbs, and a repair runs if
+ * a published limit still fails.
+ * swapFood replaces one item and re-solves only that meal towards its previous totals; replaceDisallowed does the
+ * same for every item whose food is no longer allowed.
  * Warnings are always checkPlan's issues, so they describe the plan as it is.
  */
 (function (root) {
@@ -33,8 +38,12 @@
   const MIN_PORTION_KCAL = 50;     // protein and carb items are generated at no less than ~50 kcal
   const MIN_CARB_KCAL = { main: 150, breakfast: 80 };   // a real side of potatoes/rice/pasta, not a garnish
   const MAX_CORRECTION_STEPS = 600;
+  const MAX_REPAIR_ROUNDS = 8;
   const MAX_SEARCH_ROUNDS = 4;
   const MAX_SEARCH_EVALS = 150;    // bounds the food-choice search (each evaluation is a full day solve)
+  const CARB_STRETCH = 1.25;       // a rescaled increase may stretch carb portions to 1.25 × their maximum…
+  const FAT_ROOM_PCT = 10;         // …once fat items took what keeps the day's fat within 10 % of its target
+  const FAT_HIGH_PCT = 20;         // fat further above its target than this is reported
 
   // Internal nutrient vectors: [kcal, protein, carbs, fat, fibre] per gram.
   const K = 0, P = 1, C = 2, FA = 3, FI = 4;
@@ -82,11 +91,24 @@
     }
   }
 
-  // Fat- and carb-role foods are capped at the grams giving ~900 kcal, everything else at 350 g;
-  // unit foods are capped at whole units.
+  // Lunch/dinner only for protein, carb and vegetable foods and for cooking fats (oil, butter, avocado); dairy,
+  // fruit, nuts and seeds also suit breakfast and snacks (as in the built-in database).
+  function defaultMeals(f) {
+    if (f.category === 'dairy' || f.category === 'fruit') return ['breakfast', 'main'];
+    if (f.category === 'fat') return fatSuits(f, 'main') ? ['main'] : ['breakfast', 'main'];
+    return ['main'];
+  }
+
+  // Per-meal caps modelled on the built-in foods of the same role: protein ≤ 300 g and ~450 kcal; carbs ≤ 500 g and
+  // ~550 kcal (150 g of a dry grain, 500 g of potatoes); fat ~225 kcal within 25–150 g (25 g oil, 35 g nuts,
+  // 140 g avocado); vegetables 400 g, fruit 300 g. Unit foods are capped at whole units.
   function defaultMaxPerMeal(f) {
-    const dense = f.slots.indexOf('protein') < 0 && (f.slots.indexOf('fat') >= 0 || f.slots.indexOf('carb') >= 0);
-    const g = dense && num(f.kcal) > 0 ? 900 / f.kcal * 100 : 350;
+    const gramsFor = function (kcal) { return num(f.kcal) > 0 ? kcal / f.kcal * 100 : Infinity; };
+    let g;
+    if (f.slots.indexOf('protein') >= 0) g = Math.min(300, gramsFor(450));
+    else if (f.slots.indexOf('carb') >= 0) g = Math.min(500, gramsFor(550));
+    else if (f.slots.indexOf('fat') >= 0) g = Math.min(150, Math.max(25, gramsFor(225)));
+    else g = f.category === 'fruit' ? 300 : 400;
     if (f.unit) return Math.max(1, Math.floor(g / f.unit.grams)) * f.unit.grams;
     return Math.max(5, Math.round(g / 5) * 5);
   }
@@ -97,7 +119,7 @@
     ['protein', 'carbs', 'fat', 'fibre'].forEach(function (k) { f[k] = num(f[k]); });
     f.unit = f.unit && num(f.unit.grams) > 0 ? f.unit : null;
     if (!Array.isArray(f.slots)) f.slots = defaultSlots(f);
-    if (!Array.isArray(f.meals) || !f.meals.length) f.meals = ['breakfast', 'main'];
+    if (!Array.isArray(f.meals) || !f.meals.length) f.meals = defaultMeals(f);
     if (!(num(f.fill) > 0)) f.fill = 3;
     if (!(num(f.maxPerMeal) > 0)) f.maxPerMeal = defaultMaxPerMeal(f);
     return f;
@@ -351,7 +373,7 @@
 
   // ---------- scoring and greedy correction ----------
   function sq(x) { return x * x; }
-  // Fat below this is reported as a warning (fat above target is not: it only happens when carbs are capped).
+  // Fat below this is reported as a warning (as is fat more than FAT_HIGH_PCT above target).
   function fatFloor(T) { return T.fat > 0 ? T.fat - Math.max(10, 0.2 * T.fat) : 0; }
 
   // Penalties shared by generation and swaps, in kcal-equivalents squared, in priority order:
@@ -444,6 +466,115 @@
     return best;
   }
 
+  // ---------- repair against the published limits ----------
+  // How far day totals `t` are outside each rule that produces a warning: [kcal, protein, fibre, fat floor]
+  // (0 = met), weighted so that 1 % kcal counts like 5 g protein.
+  function limitParts(t, T) {
+    const kPct = T.kcal > 0 ? Math.abs(t[K] - T.kcal) / T.kcal * 100 : 0;
+    return [Math.max(0, kPct - KCAL_TOL_PCT - 1e-9) * 10, Math.max(0, Math.abs(t[P] - T.protein) - PROTEIN_TOL_G - 1e-9) * 2,
+      Math.max(0, FIBRE_MIN_G - t[FI] - 1e-9) * 2, Math.max(0, fatFloor(T) - t[FA] - 1e-9)];
+  }
+  function sum(a) { return a.reduce(function (s, x) { return s + x; }, 0); }
+
+  // Every portion an item may take: whole steps within [lo, hi], plus 0 for an optional item (lo 0).
+  function portionGrid(it) {
+    const s = stepOf(it.food), out = it.lo === 0 ? [0] : [];
+    for (let g = Math.max(s, Math.ceil(it.lo / s - 1e-9) * s); g <= it.hi + 1e-9; g += s) out.push(g);
+    return out;
+  }
+
+  // Last resort when the descent ends outside a published limit (it aims inside them and moves one step at a
+  // time): moves one item, or two at once, to any portion on its grid (e.g. one more egg paid for with four fewer
+  // rice cakes). Each round applies the move that most reduces the kcal/protein/fibre violation without breaking a
+  // rule that holds (the fat floor included; ties: lowest `scorer(totals, mealTotals)`, as in correct), until those
+  // rules hold; if they never all hold, every portion goes back to where it was (a partial fix is not worth odd
+  // portions). For the second item only the portions next to a rule boundary (and its bounds) are tried: the
+  // violation is piecewise linear in its grams, so its minimum lies there. `offset` holds the day totals outside
+  // `meals`.
+  function repair(meals, movable, T, scorer, offset) {
+    const start = movable.map(function (ref) { return meals[ref.m].items[ref.i].grams; });
+    if (!repairRounds(meals, movable, T, scorer, offset)) {
+      movable.forEach(function (ref, i) { meals[ref.m].items[ref.i].grams = start[i]; });
+    }
+  }
+
+  // The rounds of repair; true when the kcal, protein and fibre rules end up met.
+  function repairRounds(meals, movable, T, scorer, offset) {
+    const tot = dayVec(meals);
+    const mealT = meals.map(mealVec);
+    const items = movable.map(function (ref) {
+      const it = meals[ref.m].items[ref.i];
+      return { it: it, m: ref.m, grid: portionGrid(it), near: [] };
+    }).filter(function (x) { return x.grid.length > 1; });
+    const bounds = [[K, T.kcal * (1 - KCAL_TOL_PCT / 100)], [K, T.kcal * (1 + KCAL_TOL_PCT / 100)], [P, T.protein - PROTEIN_TOL_G],
+      [P, T.protein + PROTEIN_TOL_G], [FI, FIBRE_MIN_G], [FA, fatFloor(T)]];
+    const day = [0, 0, 0, 0, 0];
+    let held = null;
+    // kcal + protein + fibre violation of `day`, or Infinity when a rule in `held` breaks
+    function judge() {
+      const parts = limitParts(day, T);
+      for (let i = 0; i < 4; i++) if (held[i] && parts[i] > 0) return Infinity;
+      return parts[0] + parts[1] + parts[2];
+    }
+    function shift(x, g, sign) {
+      const dg = (g - x.it.grams) * sign;
+      for (let k = 0; k < 5; k++) { tot[k] += x.it.v[k] * dg; mealT[x.m][k] += x.it.v[k] * dg; }
+    }
+    // fills x.near with the portions of x next to each rule boundary (given the current totals) and its bounds
+    function nearBoundaries(x) {
+      const s = stepOf(x.it.food), g0 = x.grid[0], last = x.grid[x.grid.length - 1];
+      const lowest = g0 === 0 ? x.grid[1] : g0;
+      x.near.length = 0;
+      x.near.push(g0, last);
+      bounds.forEach(function (b) {
+        const v = x.it.v[b[0]];
+        if (!(v > 0)) return;
+        const g = x.it.grams + (b[1] - tot[b[0]] - offset[b[0]]) / v;
+        [Math.floor(g / s + 1e-9) * s, Math.ceil(g / s - 1e-9) * s].forEach(function (c) {
+          x.near.push(c <= 0 && g0 === 0 ? 0 : Math.min(last, Math.max(lowest, c)));
+        });
+      });
+      return x.near;
+    }
+    for (let round = 0; round < MAX_REPAIR_ROUNDS; round++) {
+      for (let k = 0; k < 5; k++) day[k] = tot[k] + offset[k];
+      held = limitParts(day, T).map(function (x) { return x === 0; });
+      const cur = judge();
+      if (cur === 0) return true;
+      let best = null, bestV = cur - 1e-6, bestS = Infinity;
+      // a: moved to ga (already applied to tot); b (optional) to gb
+      const consider = function (a, ga, b, gb) {
+        for (let k = 0; k < 5; k++) day[k] = tot[k] + offset[k] + (b ? b.it.v[k] * (gb - b.it.grams) : 0);
+        const v = judge();
+        if (v > bestV + 1e-9) return;
+        if (b) shift(b, gb, 1);
+        const s = scorer(tot, mealT);
+        if (b) shift(b, gb, -1);
+        if (v < bestV - 1e-9 || s < bestS) { best = [[a, ga]].concat(b ? [[b, gb]] : []); bestV = v; bestS = s; }
+      };
+      items.forEach(function (a, ai) {
+        const saved = a.it.grams;
+        a.grid.forEach(function (ga) {
+          if (ga === saved) return;
+          shift(a, ga, 1);
+          a.it.grams = ga;
+          consider(a, ga, null, 0);
+          for (let bi = ai + 1; bi < items.length; bi++) {
+            const b = items[bi];
+            nearBoundaries(b).forEach(function (gb) { if (gb !== b.it.grams) consider(a, ga, b, gb); });
+          }
+          a.it.grams = saved;
+          shift(a, ga, -1);
+        });
+      });
+      if (!best) return false;
+      best.forEach(function (mv) { shift(mv[0], mv[1], 1); mv[0].it.grams = mv[1]; });
+    }
+    for (let k = 0; k < 5; k++) day[k] = tot[k] + offset[k];
+    const parts = limitParts(day, T);
+    return parts[0] + parts[1] + parts[2] === 0;
+  }
+
   // ---------- generation ----------
   function buildDay(layout, sel, T) {
     const meals = layout.map(function (L, i) {
@@ -461,14 +592,18 @@
     });
     meals.forEach(function (m) { solveMeal(m, shareAim(T, m.share)); });
     growFibre(meals, function (m) { solveMeal(m, shareAim(T, m.share)); });
-    const movable = [];
-    meals.forEach(function (m, mi) { m.items.forEach(function (it, ii) { movable.push({ m: mi, i: ii }); }); });
-    correct(meals, movable, dayScorer(T, meals));
+    correct(meals, itemRefs(meals), dayScorer(T, meals));
     return meals;
   }
 
-  // Grows produce (vegetables first, smallest portion first) until the day reaches the fibre aim; the meal is
-  // re-solved after every step so the extra produce replaces carb-food energy.
+  function itemRefs(meals) {
+    const out = [];
+    meals.forEach(function (m, mi) { m.items.forEach(function (it, ii) { if (!it.inert) out.push({ m: mi, i: ii }); }); });
+    return out;
+  }
+
+  // Grows produce (vegetables first, smallest portion first) until the day reaches the fibre aim; `resolve(meal)`
+  // (optional) re-solves the meal after every step so the extra produce replaces carb-food energy.
   function growFibre(meals, resolve) {
     for (let guard = 0; guard < 200 && dayVec(meals)[FI] < FIBRE_AIM_G; guard++) {
       let pick = null;
@@ -491,23 +626,22 @@
       if (!pick) return;
       const it = pick.it;
       it.grams = it.lo = Math.min(it.hi, it.food.unit ? it.grams + it.food.unit.grams : it.grams + PRODUCE_GROW_G);
-      resolve(pick.m);
+      if (resolve) resolve(pick.m);
     }
   }
 
   // Sum of how far the day is outside the rules that produce warnings (0 = all met); used to compare
   // alternative food choices.
-  function violation(meals, T) {
-    const tot = dayVec(meals);
-    const kPct = T.kcal > 0 ? Math.abs(tot[K] - T.kcal) / T.kcal * 100 : 0;
-    return Math.max(0, kPct - KCAL_TOL_PCT) * 10 + Math.max(0, Math.abs(tot[P] - T.protein) - PROTEIN_TOL_G) * 2 +
-      Math.max(0, FIBRE_MIN_G - tot[FI]) * 2 + Math.max(0, fatFloor(T) - tot[FA]);
-  }
+  function violation(meals, T) { return sum(limitParts(dayVec(meals), T)); }
 
-  function evaluate(layout, sel, T) {
-    const meals = buildDay(layout, sel, T);
+  function scored(sel, meals, T) {
     const scorer = dayScorer(T, meals);
     return { sel: sel, meals: meals, bad: violation(meals, T), score: scorer(dayVec(meals), meals.map(mealVec)) };
+  }
+  function evaluate(layout, sel, T) { return scored(sel, buildDay(layout, sel, T), T); }
+  function repaired(res, T) {
+    repair(res.meals, itemRefs(res.meals), T, dayScorer(T, res.meals), [0, 0, 0, 0, 0]);
+    return scored(res.sel, res.meals, T);
   }
 
   function better(a, b) { return a.bad < b.bad - 1e-9 || (Math.abs(a.bad - b.bad) <= 1e-9 && a.score < b.score - 1e-6); }
@@ -553,7 +687,11 @@
     const allowed = allowedIds(F, opts.liked, opts.excluded).map(function (id) { return F[id]; });
     const lists = candidateLists(allowed);
     let res = evaluate(layout, selectFoods(layout, lists), T);
-    if (res.bad > 0) res = improveSelection(layout, lists, res, T);
+    if (res.bad > 0) res = repaired(res, T);
+    if (res.bad > 0) {
+      const alt = improveSelection(layout, lists, res, T);
+      if (alt !== res) res = repaired(alt, T);
+    }
     const plan = { mealsPerDay: n, targets: T, meals: res.meals.map(toOutputMeal), warnings: [] };
     plan.warnings = checkPlan(plan, F, T).issues;
     return plan;
@@ -578,8 +716,17 @@
     return { day: day, meals: meals };
   }
 
-  function fmt(x) { return String(Math.round(x)); }
-  function signed(x) { const r = Math.round(x * 10) / 10; return (r > 0 ? '+' : r < 0 ? '−' : '') + String(Math.abs(r)); }
+  function roundTo(x, d) { const s = Math.pow(10, d); return Math.round(x * s) / s; }
+  function fmt(x, d) { return String(roundTo(x, d || 0)); }
+  function signed(x, d) { const r = roundTo(x, d); return (r > 0 ? '+' : r < 0 ? '−' : '') + String(Math.abs(r)); }
+  // Fewest decimals (0–9) at which `x`, rounded, still reads as past `limit` (on the same side of it as x), so a
+  // warning never says "+10 g, limit ±10 g" or "Fibre 25 g is below 25 g".
+  function limitDecimals(x, limit) {
+    const side = Math.sign(x - limit);
+    let d = 0;
+    while (d < 9 && Math.sign(roundTo(x, d) - limit) !== side) d++;
+    return d;
+  }
 
   function checkPlan(plan, foods, targets) {
     const T = pickTargets(targets || plan.targets);
@@ -596,7 +743,9 @@
         if (count[it.role] !== undefined) count[it.role]++;
         if (it.role === 'produce' && f.category === 'vegetable') veg[f.id] = true;
         if (it.role === 'produce' && f.category === 'fruit') fruit[f.id] = true;
-        if (it.grams > maxGrams(f) + 1e-9) issues.push(m.name + ': ' + f.name + ' ' + fmt(it.grams) + ' g is above the ' + fmt(f.maxPerMeal) + ' g per-meal maximum.');
+        if (it.grams > maxGrams(f) + 1e-9) {
+          issues.push(m.name + ': ' + f.name + ' ' + fmt(it.grams) + ' g is above the ' + fmt(f.maxPerMeal) + ' g per-meal maximum (more meals per day would spread it).');
+        }
       });
       if (count.protein !== 1) issues.push(m.name + ': ' + (count.protein ? 'more than one protein food.' : 'no protein food (like a protein food that suits this meal).'));
       if (count.carb !== 1) issues.push(m.name + ': ' + (count.carb ? 'more than one carb food.' : 'no carb food (like a carb food that suits this meal).'));
@@ -604,16 +753,26 @@
     });
     const vegCount = Object.keys(veg).length, fruitCount = Object.keys(fruit).length;
     if (Math.abs(kcalDiffPct) > KCAL_TOL_PCT + 1e-9) {
-      issues.push('Calories ' + fmt(d.kcal) + ' kcal vs target ' + fmt(T.kcal) + ' (' + signed(kcalDiffPct) + ' %, limit ±5 %).');
+      const kd = Math.max(1, limitDecimals(kcalDiffPct, Math.sign(kcalDiffPct) * KCAL_TOL_PCT));
+      issues.push('Calories ' + fmt(d.kcal) + ' kcal vs target ' + fmt(T.kcal) + ' (' + signed(kcalDiffPct, kd) + ' %, limit ±5 %).');
     }
     if (Math.abs(proteinDiffG) > PROTEIN_TOL_G + 1e-9) {
-      issues.push('Protein ' + fmt(d.protein) + ' g vs target ' + fmt(T.protein) + ' g (' + signed(proteinDiffG) + ' g, limit ±10 g).');
+      const pd = limitDecimals(proteinDiffG, Math.sign(proteinDiffG) * PROTEIN_TOL_G);
+      issues.push('Protein ' + fmt(d.protein, pd) + ' g vs target ' + fmt(T.protein, pd) + ' g (' + signed(proteinDiffG, Math.max(1, pd)) +
+        ' g, limit ±10 g).');
     }
-    if (d.fibre < FIBRE_MIN_G - 1e-9) issues.push('Fibre ' + fmt(d.fibre) + ' g is below 25 g: like more vegetables, fruit or wholegrain carbs.');
+    if (d.fibre < FIBRE_MIN_G - 1e-9) {
+      issues.push('Fibre ' + fmt(d.fibre, limitDecimals(d.fibre, FIBRE_MIN_G)) + ' g is below 25 g: like more vegetables, fruit or wholegrain carbs.');
+    }
     if (vegCount < VEG_MIN) issues.push((vegCount ? 'Only 1 different vegetable' : 'No vegetables') + ' in the day (need 2): like more vegetables.');
     if (fruitCount < FRUIT_MIN) issues.push('No fruit in the day (need 1): like a fruit.');
     if (d.fat < fatFloor(T) - 1e-9) {
       issues.push('Fat ' + fmt(d.fat) + ' g is well below the ' + fmt(T.fat) + ' g target: like a fat source (oil, nuts, avocado).');
+    }
+    const fatPct = T.fat > 0 ? (d.fat - T.fat) / T.fat * 100 : 0;
+    if (fatPct > FAT_HIGH_PCT + 1e-9) {
+      issues.push('Fat ' + fmt(d.fat) + ' g is ' + fmt(fatPct, limitDecimals(fatPct, FAT_HIGH_PCT)) + ' % above the ' + fmt(T.fat) +
+        ' g target (limit +20 %): leaner foods, or more room for carbs (more meals per day), would bring it down.');
     }
     return { ok: issues.length === 0, kcalDiffPct: kcalDiffPct, proteinDiffG: proteinDiffG, fibre: d.fibre, vegCount: vegCount, fruitCount: fruitCount, issues: issues };
   }
@@ -681,6 +840,53 @@
     return out;
   }
 
+  function snapshot(items) { return new Map(items.map(function (it) { return [it, it.grams]; })); }
+
+  // Moves the protein items towards the day's protein `target` (in proportion to the protein they carry).
+  function moveProtein(meals, items, target) {
+    const origin = snapshot(items);
+    const dP = target - dayVec(meals)[P];
+    spread(items, dP, P, function (it) { return it.grams * it.v[P]; });
+    polish(items, Math.sign(dP), P, target, dayVec(meals)[P], origin);
+  }
+
+  // Energy the fat items may add before the day's fat passes FAT_ROOM_PCT above its target.
+  function fatRoomKcal(meals, fats, T) {
+    let kcal = 0, fat = 0;
+    fats.forEach(function (it) { kcal += it.v[K] * it.grams; fat += it.v[FA] * it.grams; });
+    const room = T.fat * (1 + FAT_ROOM_PCT / 100) - dayVec(meals)[FA];
+    return fat > 0 && room > 0 ? room * kcal / fat : 0;
+  }
+
+  // Moves the day's energy towards T.kcal through the carb items (in proportion to their carb grams), then the fat
+  // items. An increase the carb items cannot hold goes to fat while the day's fat stays within FAT_ROOM_PCT of its
+  // target; if the day is then still short by more than the aim band, the carb items stretch to CARB_STRETCH × their
+  // maximum (a maintenance break is "added back as carbs"). Fat takes whatever is left.
+  function moveEnergy(meals, carbs, fats, T) {
+    const origin = snapshot(carbs.concat(fats));
+    const dK = T.kcal - dayVec(meals)[K];
+    const byCarbs = function (it) { return it.grams * it.v[C]; };
+    const byFat = function (it) { return it.grams * it.v[FA]; };
+    let left = spread(carbs, dK, K, byCarbs), fatMoved = false;
+    if (left > 1e-6) {
+      const room = Math.min(left, fatRoomKcal(meals, fats, T));
+      fatMoved = room > 0;
+      left += spread(fats, room, K, byFat) - room;
+      if (T.kcal - dayVec(meals)[K] > T.kcal * KCAL_AIM_PCT / 100) {
+        carbs.forEach(function (it) {
+          const s = stepOf(it.food);
+          it.hi = Math.max(it.hi, Math.floor(CARB_STRETCH * maxGrams(it.food) / s + 1e-9) * s);
+        });
+        left = spread(carbs, left, K, byCarbs);
+      }
+    }
+    if (Math.abs(left) > 1e-6 && Math.sign(left) === Math.sign(dK)) {
+      spread(fats, left, K, byFat);
+      fatMoved = true;
+    }
+    polish(fatMoved ? carbs.concat(fats) : carbs, Math.sign(dK), K, T.kcal, dayVec(meals)[K], origin);
+  }
+
   function rescalePlan(plan, foods, newTargets) {
     const F = normalizeMap(foods);
     const T1 = pickTargets(newTargets);
@@ -688,48 +894,31 @@
     out.targets = T1;
     if (sameTargets(pickTargets(plan.targets), T1)) return { plan: out, changes: [] };
     const meals = toWorkMeals(plan, F);
-    const origin = new Map();
-    meals.forEach(function (m) { m.items.forEach(function (it) { origin.set(it, it.grams); }); });
+    byRole(meals, 'produce').forEach(function (it) { it.lo = it.grams; });   // produce only grows (for fibre)
+    const proteins = byRole(meals, 'protein'), carbs = byRole(meals, 'carb'), fats = byRole(meals, 'fat');
 
     // 1. protein items move only when the protein target moved, towards the new target
-    if (pickTargets(plan.targets).protein !== T1.protein) {
-      const items = byRole(meals, 'protein');
-      const dP = T1.protein - dayVec(meals)[P];
-      spread(items, dP, P, function (it) { return it.grams * it.v[P]; });
-      polish(items, Math.sign(dP), P, T1.protein, dayVec(meals)[P], origin);
-    }
-    // 2. energy: carb items first (in proportion to their carb grams), then fat items
-    const dK = T1.kcal - dayVec(meals)[K];
-    const carbs = byRole(meals, 'carb'), fats = byRole(meals, 'fat');
-    const left = spread(carbs, dK, K, function (it) { return it.grams * it.v[C]; });
-    let used = carbs;
-    if (Math.abs(left) > 1e-6 && Math.sign(left) === Math.sign(dK)) {
-      spread(fats, left, K, function (it) { return it.grams * it.v[FA]; });
-      used = carbs.concat(fats);
-    }
-    polish(used, Math.sign(dK), K, T1.kcal, dayVec(meals)[K], origin);
+    if (pickTargets(plan.targets).protein !== T1.protein) moveProtein(meals, proteins, T1.protein);
+    const proteinTol = Math.max(PROTEIN_AIM_G, Math.abs(T1.protein - dayVec(meals)[P]));
+    // 2. energy: carb items first, then fat items
+    moveEnergy(meals, carbs, fats, T1);
 
-    // 3. carb and fat foods carry protein too (a maintenance break adds ~25 g of it through potatoes, oats,
-    //    bread…). Hold the day's protein inside the aim by nudging the protein items, then put the energy that
-    //    moved back through carbs (then fat). A few passes settle both.
-    const snapshot = function (items) { return new Map(items.map(function (it) { return [it, it.grams]; })); };
+    // 3. carb and fat foods carry protein and fibre too (a maintenance break adds ~25 g of protein through
+    //    potatoes, oats, bread…; a cut takes fibre away with them). When protein drifted outside the aim (and
+    //    further than the plan already was) move the protein items back towards the target; when fibre fell below
+    //    25 g grow produce to the aim; then put the energy that moved back through carbs (then fat). A few passes
+    //    settle all three.
     for (let pass = 0; pass < 4; pass++) {
-      const pErr = T1.protein - dayVec(meals)[P];
-      if (Math.abs(pErr) <= PROTEIN_AIM_G) break;
-      const pro = byRole(meals, 'protein');
-      const po = snapshot(pro);
-      spread(pro, pErr, P, function (it) { return it.grams * it.v[P]; });
-      polish(pro, Math.sign(pErr), P, T1.protein, dayVec(meals)[P], po);
-      const kErr = T1.kcal - dayVec(meals)[K];
-      const eo = snapshot(carbs.concat(fats));
-      const rest = spread(carbs, kErr, K, function (it) { return it.grams * it.v[C]; });
-      let moved = carbs;
-      if (Math.abs(rest) > 1e-6 && Math.sign(rest) === Math.sign(kErr)) {
-        spread(fats, rest, K, function (it) { return it.grams * it.v[FA]; });
-        moved = carbs.concat(fats);
-      }
-      polish(moved, Math.sign(kErr), K, T1.kcal, dayVec(meals)[K], eo);
+      const proteinOff = Math.abs(T1.protein - dayVec(meals)[P]) > proteinTol + 1e-9;
+      const fibreLow = dayVec(meals)[FI] < FIBRE_MIN_G - 1e-9;
+      if (!proteinOff && !fibreLow) break;
+      if (proteinOff) moveProtein(meals, proteins, T1.protein);
+      if (fibreLow) growFibre(meals, null);
+      moveEnergy(meals, carbs, fats, T1);
     }
+    // 4. a published limit still fails (e.g. carbs at their floor): repair with every item, produce only growing
+    const aim = [T1.kcal, T1.protein, T1.carbs, T1.fat];
+    repair(meals, itemRefs(meals), T1, function (tot) { return penalty(tot, T1, aim, FIBRE_AIM_G); }, [0, 0, 0, 0, 0]);
 
     const changes = [];
     out.meals.forEach(function (m, mi) {
@@ -755,19 +944,25 @@
     return ids;
   }
 
-  function swapCandidates(plan, foods, liked, excluded, mealKey, itemIndex) {
-    const F = normalizeMap(foods);
+  // Allowed replacements for one item, best-ranked first: foods of the same category (of the same role when the
+  // item's food is unknown, e.g. a deleted custom food; produce then prefers the meal type's kind, as in generation)
+  // that fit the role and meal type and are not already in the meal.
+  function candidatesFor(plan, F, allowed, mealKey, itemIndex) {
     const meal = (plan.meals || []).filter(function (m) { return m.key === mealKey; })[0];
     const item = meal && meal.items[itemIndex];
-    const cur = item && F[item.foodId];
-    if (!cur) return [];
+    if (!item) return [];
+    const cur = F[item.foodId];
     const type = MEAL_TYPE[mealKey] || 'main';
     const inMeal = {};
     meal.items.forEach(function (it) { inMeal[it.foodId] = true; });
-    let list = allowedIds(F, liked, excluded).map(function (id) { return F[id]; }).filter(function (f) {
-      return !inMeal[f.id] && f.category === cur.category && fits(f, item.role, type);
+    let list = allowed.filter(function (f) {
+      return !inMeal[f.id] && (!cur || f.category === cur.category) && fits(f, item.role, type);
     });
-    if (cur.category === 'vegetable' && item.role === 'produce') {
+    if (!cur && item.role === 'produce') {
+      const preferred = list.filter(function (f) { return f.category === (type === 'main' ? 'vegetable' : 'fruit'); });
+      if (preferred.length) list = preferred;
+    }
+    if (cur && cur.category === 'vegetable' && item.role === 'produce') {
       // a vegetable already used elsewhere is only offered when the day keeps 2 different vegetables
       const before = Object.keys(vegIds(plan, F)).length;
       const others = vegIds(plan, F, item);
@@ -776,7 +971,57 @@
         return after >= VEG_MIN || after >= before;
       });
     }
-    return rankFoods(list, item.role, type).map(function (f) { return f.id; });
+    return rankFoods(list, item.role, type);
+  }
+
+  function swapCandidates(plan, foods, liked, excluded, mealKey, itemIndex) {
+    const F = normalizeMap(foods);
+    const allowed = allowedIds(F, liked, excluded).map(function (id) { return F[id]; });
+    return candidatesFor(plan, F, allowed, mealKey, itemIndex).map(function (f) { return f.id; });
+  }
+
+  // Copy of `plan` with item `ii` of meal `mi` replaced by `food` (dropped when `food` is null); only that meal is
+  // re-solved, the other meals stay as they are. The meal aims at its previous totals (at its share of the targets
+  // when the old food is unknown); a dropped item's fat energy moves to carbs. The meal is solved by least squares,
+  // then (after a replacement) by the descent against the day targets, and repaired if a published limit fails.
+  // Produce may grow but never shrinks.
+  function replaceItem(plan, F, mi, ii, food) {
+    const T = pickTargets(plan.targets);
+    const meals = toWorkMeals(plan, F);
+    const meal = meals[mi];
+    const old = meal.items[ii];
+    const before = mealVec(meal);
+    const fibreAim = Math.min(FIBRE_AIM_G, Math.max(dayVec(meals)[FI], FIBRE_MIN_G));
+    let aim = old.inert ? shareAim(T, meal.share) : [before[K], before[P], before[C], before[FA]];
+    if (food) {
+      // new item: start from the portion that supplies the same amount of the role's key nutrient
+      const key = { protein: P, carb: C, fat: FA }[old.role];
+      const next = mkItem(food, old.role, 0, old.role === 'protein' || old.role === 'carb' ? minPortion(food) : stepOf(food));
+      const startG = key === undefined || !(next.v[key] > 0) ? old.grams : old.grams * old.v[key] / next.v[key];
+      next.grams = Math.min(next.hi, Math.max(next.lo, roundGrams(food, startG)));
+      meal.items[ii] = next;
+    } else {
+      const fat = old.v[FA] * old.grams;
+      if (!old.inert) aim = [aim[K], aim[P], aim[C] + fat * 9 / 4, aim[FA] - fat];
+      meal.items.splice(ii, 1);
+    }
+    meal.items.forEach(function (it) { if (it.role === 'produce' && !it.inert) it.lo = it.grams; });
+    solveMeal(meal, aim);
+    const rest = dayVec(meals.filter(function (m, i) { return i !== mi; }));
+    const dayAim = [rest[K] + aim[K], rest[P] + aim[P], rest[C] + aim[C], rest[FA] + aim[FA]];
+    const scorer = function (tot) {
+      const day = [0, 0, 0, 0, 0];
+      for (let k = 0; k < 5; k++) day[k] = rest[k] + tot[k];
+      return penalty(day, T, dayAim, fibreAim);
+    };
+    const movable = itemRefs([meal]);
+    // (after a drop the descent would chase the lost fat through vegetables and protein foods)
+    if (food) correct([meal], movable, scorer);
+    repair([meal], movable, T, scorer, rest);
+    const out = clonePlan(plan);
+    out.meals[mi].items = meal.items.map(function (it) { return { foodId: it.food.id, role: it.role, grams: it.grams }; });
+    out.warnings = checkPlan(out, F, T).issues;
+    return out;
   }
 
   function swapFood(plan, foods, liked, excluded, mealKey, itemIndex, newFoodId) {
@@ -784,43 +1029,51 @@
       throw new Error('swapFood: ' + newFoodId + ' is not a valid replacement for item ' + itemIndex + ' of ' + mealKey);
     }
     const F = normalizeMap(foods);
-    const T = pickTargets(plan.targets);
-    const meals = toWorkMeals(plan, F);
     const mi = plan.meals.map(function (m) { return m.key; }).indexOf(mealKey);
-    const meal = meals[mi];
-    const before = mealVec(meal);
-    const beforeFibre = dayVec(meals)[FI];
+    return replaceItem(plan, F, mi, itemIndex, F[newFoodId]);
+  }
 
-    // new item: start from the portion that supplies the same amount of the role's key nutrient
-    const old = meal.items[itemIndex], food = F[newFoodId];
-    const key = { protein: P, carb: C, fat: FA }[old.role];
-    const next = mkItem(food, old.role, 0, old.role === 'protein' || old.role === 'carb' ? minPortion(food) : stepOf(food));
-    const startG = key === undefined || !(next.v[key] > 0) ? old.grams : old.grams * old.v[key] / next.v[key];
-    next.grams = Math.min(next.hi, Math.max(next.lo, roundGrams(food, startG)));
-    meal.items[itemIndex] = next;
-    // produce portions may grow (fibre) but never shrink to make room for energy
-    meal.items.forEach(function (it) { if (it.role === 'produce' && !it.inert) it.lo = it.grams; });
+  // An item may be dropped when its meal keeps a protein food, a carb food and a produce item without it.
+  function droppable(meal, at) {
+    const role = meal.items[at].role;
+    if (role !== 'protein' && role !== 'carb' && role !== 'produce') return true;
+    return meal.items.some(function (it, i) { return i !== at && it.role === role; });
+  }
 
-    // re-solve this meal only, towards its previous totals; the day must keep its hard rules
-    solveMeal(meal, [before[K], before[P], before[C], before[FA]]);
-    // The soft aim is the day as it was before the swap, so the meal is pulled back to its previous totals.
-    const fibreAim = Math.min(FIBRE_AIM_G, Math.max(beforeFibre, FIBRE_MIN_G));
-    const rest = dayVec(meals.filter(function (m, i) { return i !== mi; }));
-    const aim = [rest[K] + before[K], rest[P] + before[P], rest[C] + before[C], rest[FA] + before[FA]];
-    const scorer = function (tot) {
-      const day = [0, 0, 0, 0, 0];
-      for (let k = 0; k < 5; k++) day[k] = rest[k] + tot[k];
-      return penalty(day, T, aim, fibreAim);
-    };
-    const movable = meal.items.map(function (it, ii) { return { m: 0, i: ii }; }).filter(function (r) { return !meal.items[r.i].inert; });
-    correct([meal], movable, scorer);
-
-    const out = clonePlan(plan);
-    out.meals[mi].items = meal.items.map(function (it, ii) {
-      return { foodId: it.food.id, role: plan.meals[mi].items[ii].role, grams: it.grams };
+  // For a food that stops being allowed (marked "won't eat", un-liked, or a deleted custom food): every item whose
+  // food is not allowed is swapped for its best-ranked candidate (foods not yet used elsewhere in the day first),
+  // re-solving only that meal as swapFood does. Without a candidate the item is dropped (and its meal re-solved) when
+  // the meal keeps its required roles; otherwise it stays and is listed in `impossible` (regenerate instead).
+  // Item indices refer to the input plan, which is never mutated.
+  function replaceDisallowed(plan, foods, liked, excluded) {
+    const F = normalizeMap(foods);
+    const allowed = allowedIds(F, liked, excluded).map(function (id) { return F[id]; });
+    const ok = {};
+    allowed.forEach(function (f) { ok[f.id] = true; });
+    let out = clonePlan(plan);
+    const replaced = [], dropped = [], impossible = [];
+    plan.meals.forEach(function (m, mi) {
+      let removed = 0;
+      m.items.forEach(function (it, ii) {
+        if (ok[it.foodId]) return;
+        const at = ii - removed;
+        const uses = {};
+        out.meals.forEach(function (om) { om.items.forEach(function (x) { uses[x.foodId] = (uses[x.foodId] || 0) + 1; }); });
+        const cands = candidatesFor(out, F, allowed, m.key, at).sort(function (a, b) { return (uses[a.id] || 0) - (uses[b.id] || 0); });
+        if (cands.length) {
+          out = replaceItem(out, F, mi, at, cands[0]);
+          replaced.push({ mealKey: m.key, itemIndex: ii, from: it.foodId, to: cands[0].id });
+        } else if (droppable(out.meals[mi], at)) {
+          out = replaceItem(out, F, mi, at, null);
+          removed++;
+          dropped.push({ mealKey: m.key, itemIndex: ii, foodId: it.foodId });
+        } else {
+          impossible.push({ mealKey: m.key, itemIndex: ii, foodId: it.foodId });
+        }
+      });
     });
-    out.warnings = checkPlan(out, F, T).issues;
-    return out;
+    out.warnings = checkPlan(out, F, out.targets).issues;
+    return { plan: out, replaced: replaced, dropped: dropped, impossible: impossible };
   }
 
   const api = {
@@ -831,8 +1084,10 @@
     rescalePlan: rescalePlan,
     swapCandidates: swapCandidates,
     swapFood: swapFood,
+    replaceDisallowed: replaceDisallowed,
     planTotals: planTotals,
-    checkPlan: checkPlan
+    checkPlan: checkPlan,
+    limitDecimals: limitDecimals
   };
 
   if (typeof module === 'object' && module.exports) module.exports = api;

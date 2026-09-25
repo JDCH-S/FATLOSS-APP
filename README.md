@@ -101,9 +101,20 @@ python3 price_script/fetch_prices.py grocery-list-2026-10-03.json -o prices-2026
   string). Check what it will send with `--dry-run`.
 - Override an actor or its input without editing the file:
   `APIFY_ACTOR_DELHAIZE=user/actor` and `APIFY_INPUT_DELHAIZE='{"queries": {queries}, "maxItems": {max_items}}'`.
-- Matching: EAN first, then the store product code in the product URL (Delhaize exposes no EANs), then product
-  name plus pack size. For foods with no product row at a store,
-  `--discover 1` (default) adds the best search hit; the app lists it as unmatched so you can map it.
+- Matching: EAN first (leading zeros are ignored, so a 14-digit GTIN matches the 13-digit EAN), then the store
+  product code in the product URL (Delhaize exposes no EANs; its `/p/F…` and `/p/S…` codes both count), then
+  product name plus pack size. For foods with no product row at a store, `--discover 1` (default) adds the best
+  search hit that shows a pack size; the app lists it as unmatched so you can map it. A hit without a pack size
+  cannot be imported, so it is skipped and reported.
+- Pack sizes follow the food database: canned tuna, chickpeas and kidney beans in **drained** grams (the label's
+  net weight × the food's drained ratio: 0.7 for tuna, 0.6 for legumes), olive oil at 0.92 g/ml. The grocery-list
+  export carries these factors (`drained_ratio`, `g_per_ml`). Write drained grams for canned foods in hand-made
+  import files too.
+- Network trouble (timeouts, dropped connections, a response that is not JSON, HTTP 429/5xx) is retried once
+  while polling and downloading; starting a run is never retried, so nothing is billed twice. A store that still
+  fails is reported and the other stores' rows are still written (exit code 1, or 2 when no rows were written).
+  If a run outlasts `--timeout`, the message names its dataset: when the run finishes, export that dataset as
+  JSON from the Apify console and rerun with `--from-dataset`.
 - `--save-raw DIR` keeps the raw datasets and `--from-dataset Colruyt=file.json` reprocesses them without new runs.
 - Some actors are paid, and the runs are billed to your Apify account.
 
@@ -111,8 +122,16 @@ Output format (what *Import prices* accepts):
 
 ```json
 [{"store": "Colruyt", "ean": "5400141044429", "product": "BONI Skyr natuur 500g", "pack_size_g": 500,
-  "price_eur": 1.29, "promo": false, "date": "2026-10-02"}]
+  "price_eur": 1.29, "promo": false, "date": "2026-10-02"},
+ {"store": "Delhaize", "ean": "", "product": "Skyr natuur 450 g", "match_product": "Delhaize | Skyr | Natuur",
+  "pack_size_g": 450, "price_eur": 1.99, "promo": false, "date": "2026-10-02"}]
 ```
+
+`product` is always the name the store shows now. `match_product` is optional: the script adds it for product-table
+rows without an EAN, holding your table's name for that row. The app matches store + EAN, then store +
+`match_product`, then store + `product`, and a matched row takes the store's name, so the table always names the
+product the price belongs to. Rows that match nothing are listed once per store + EAN (or store + name without an
+EAN); importing the same suggestions again refreshes their price instead of adding copies.
 
 ## Data and backups
 

@@ -3,11 +3,15 @@
 
 Reads the file from the Groceries tab ("Export grocery list"), runs one Apify actor per store
 (Colruyt, Delhaize, Carrefour Belgium), matches the scraped products back to your product table
-(EAN first, then product name and pack size), and writes the JSON that the app's "Import prices"
-button accepts:
+(EAN first, then the store's product code in the URL, then product name and pack size), and writes the JSON
+that the app's "Import prices" button accepts:
 
     [{"store": "Colruyt", "ean": "...", "product": "...", "pack_size_g": 500,
       "price_eur": 3.49, "promo": false, "date": "2026-09-25"}]
+
+Rows for product-table entries without an EAN also carry "match_product" (your table's name for the row), while
+"product" is the store's current name. Pack sizes follow the food database: canned tuna and legumes in drained
+grams (label net weight x the food's drained ratio), oil at 0.92 g/ml.
 
 Usage
     export APIFY_TOKEN=apify_api_xxx            # Apify console > Settings > API & Integrations
@@ -19,7 +23,8 @@ Useful options
     --save-raw DIR                 keep each actor's raw dataset as DIR/<store>.json
     --from-dataset Colruyt=f.json  reuse a saved dataset instead of calling Apify (repeatable)
     --discover 1                   for foods without a product row at a store, add the best N search
-                                   hits; the app lists them as unmatched so you can map them to a food
+                                   hits that show a pack size; the app lists them as unmatched so you can
+                                   map them to a food
 
 Actors are configured in STORE_CONFIG below. Override one without editing the file:
     APIFY_ACTOR_COLRUYT=username/actor-name
@@ -32,6 +37,7 @@ Only the Python standard library is used. Apify bills actor runs to your account
 import argparse
 import datetime as _dt
 import difflib
+import http.client
 import json
 import os
 import re
@@ -154,13 +160,14 @@ def parse_price(value):
         return None
 
 
-_UNIT_G = {"g": 1.0, "gr": 1.0, "gram": 1.0, "grams": 1.0, "kg": 1000.0, "kilo": 1000.0,
-           "ml": 1.0, "cl": 10.0, "dl": 100.0, "l": 1000.0, "lt": 1000.0, "liter": 1000.0, "litre": 1000.0}
+_UNIT_G = {"g": 1.0, "gr": 1.0, "gram": 1.0, "grams": 1.0, "kg": 1000.0, "kilo": 1000.0}
+_UNIT_ML = {"ml": 1.0, "cl": 10.0, "dl": 100.0, "l": 1000.0, "lt": 1000.0, "liter": 1000.0, "litre": 1000.0}
 _PIECE = r"(?:st|stuks?|stk|pcs?|pieces?|x)"
 
 
-def parse_pack_size(text, unit_g=None):
-    """Grams in a pack from text like '500 g', '1,5 kg', '6 x 125 g', '1 L', '10 st' (needs unit_g)."""
+def parse_pack_size(text, unit_g=None, g_per_ml=None):
+    """Grams in a pack from text like '500 g', '1,5 kg', '6 x 125 g', '1 L' (ml x g_per_ml, default 1),
+    '10 st' (needs unit_g)."""
     if text is None:
         return None
     if isinstance(text, (int, float)) and not isinstance(text, bool):
@@ -168,14 +175,18 @@ def parse_pack_size(text, unit_g=None):
     if isinstance(text, dict):
         v = first(text, ("value", "amount", "size"))
         u = first(text, ("unit", "uom"))
-        return parse_pack_size(f"{v} {u}" if u else v, unit_g)
+        return parse_pack_size(f"{v} {u}" if u else v, unit_g, g_per_ml)
+
+    def grams(unit):
+        return _UNIT_G[unit] if unit in _UNIT_G else _UNIT_ML[unit] * (g_per_ml or 1.0)
+
     s = str(text).lower().replace(",", ".")
     m = re.search(r"(\d+(?:\.\d+)?)\s*[x×]\s*(\d+(?:\.\d+)?)\s*(kg|kilo|gr|grams?|g|ml|cl|dl|lt|liter|litre|l)\b", s)
     if m:
-        return float(m.group(1)) * float(m.group(2)) * _UNIT_G[m.group(3)]
+        return float(m.group(1)) * float(m.group(2)) * grams(m.group(3))
     m = re.search(r"(\d+(?:\.\d+)?)\s*(kg|kilo|gr|grams?|g|ml|cl|dl|lt|liter|litre|l)\b", s)
     if m:
-        return float(m.group(1)) * _UNIT_G[m.group(2)]
+        return float(m.group(1)) * grams(m.group(2))
     m = re.search(r"(\d+)\s*" + _PIECE + r"\b", s)
     if m and unit_g:
         return float(m.group(1)) * float(unit_g)
@@ -193,6 +204,11 @@ def parse_ean(value):
         return ""
     digits = re.sub(r"\D", "", str(value))
     return digits if 8 <= len(digits) <= 14 else ""
+
+
+def ean_key(ean):
+    """A barcode for comparing: the GTIN-14, EAN-13 and UPC-12 forms of one product differ only in leading zeros."""
+    return ean.lstrip("0")
 
 
 def truthy_promo(item):
@@ -214,8 +230,9 @@ def truthy_promo(item):
     return promo
 
 
-def normalize_item(raw, unit_g=None):
-    """Map one scraped dataset item to {ean, product, pack_size_g, price_eur, promo, url}."""
+def normalize_item(raw, unit_g=None, drained_ratio=None, g_per_ml=None):
+    """Map one scraped dataset item to {ean, product, pack_size_g, price_eur, promo, url}. pack_size_g is on the
+    food database's basis: a canned food's label (net) weight times its drained ratio, a liquid's ml times g_per_ml."""
     name = first(raw, NAME_FIELDS)
     if isinstance(name, dict):
         name = first(name, ("nl", "fr", "en", "value"))
@@ -227,11 +244,13 @@ def normalize_item(raw, unit_g=None):
         product = f"{str(brand).strip()} {product}".strip()
     pack = None
     for f in PACK_FIELDS:
-        pack = parse_pack_size(get_path(raw, f), unit_g)
+        pack = parse_pack_size(get_path(raw, f), unit_g, g_per_ml)
         if pack:
             break
     if not pack:
-        pack = parse_pack_size(product, unit_g)
+        pack = parse_pack_size(product, unit_g, g_per_ml)
+    if pack and drained_ratio:
+        pack *= drained_ratio
     return {
         "ean": parse_ean(first(raw, EAN_FIELDS)),
         "product": product,
@@ -257,7 +276,7 @@ def name_score(a, b):
 
 
 _CODE_PATTERNS = (
-    r"delhaize\.be/.*/p/(F\d+)",          # Delhaize: .../p/F2016122000141400000
+    r"delhaize\.be/.*/p/([A-Z]\d+)",      # Delhaize: .../p/F2016122000141400000 or .../p/S2018100200120350000
     r"colruyt\.be/.*/producten/(\d+)",     # Colruyt: /nl/producten/26267
     r"carrefour\.be/.*/(\d{6,10})\.html",  # Carrefour: .../00654629.html
 )
@@ -275,11 +294,11 @@ def store_code(url):
 def best_match(row, candidates, min_score=0.55):
     """Pick the scraped product for one product-table row: exact EAN, then the store's product code from the
     URL, else the best name (+ pack size) match."""
-    ean = parse_ean(row.get("ean"))
+    ean = ean_key(parse_ean(row.get("ean")))
     usable = [c for c in candidates if c.get("price_eur") is not None]
     if ean:
         for c in usable:
-            if c["ean"] == ean:
+            if ean_key(c["ean"]) == ean:
                 return c, 1.0, "ean"
     code = store_code(row.get("url"))
     if code:
@@ -288,7 +307,7 @@ def best_match(row, candidates, min_score=0.55):
                 return c, 1.0, "product code"
     best, best_s = None, 0.0
     for c in usable:
-        if ean and c["ean"] and c["ean"] != ean:
+        if ean and c["ean"] and ean_key(c["ean"]) != ean:
             continue  # a different barcode is a different product
         s = name_score(row.get("product", ""), c["product"])
         want = row.get("pack_size_g")
@@ -331,13 +350,11 @@ def clean_query(text):
 def match_store(export, store, raw_items, today, discover=0):
     """Return (price rows, report lines) for one store."""
     queries, plan = build_queries(export, store)
-    unit_by_food = {i["food_id"]: i.get("unit_g") for i in export.get("items", [])}
     by_query = {}
     everything = []
     for raw in raw_items:
         q = first(raw, ("searchTerm", "query", "keyword", "searchQuery", "search"))
-        unit_g = None
-        norm = normalize_item(raw, unit_g)
+        norm = normalize_item(raw)
         if not norm["product"]:
             continue
         everything.append((q, raw, norm))
@@ -346,15 +363,18 @@ def match_store(export, store, raw_items, today, discover=0):
 
     out, report, seen = [], [], set()
     for p in plan:
-        unit_g = unit_by_food.get(p["item"]["food_id"])
+        item = p["item"]
         pool = by_query.get(p["query"]) or [(r, n) for _, r, n in everything]
-        cands = [normalize_item(r, unit_g) for r, _ in pool]
-        food = p["item"].get("food") or p["item"]["food_id"]
+        cands = [normalize_item(r, item.get("unit_g"), item.get("drained_ratio"), item.get("g_per_ml")) for r, _ in pool]
+        food = item.get("food") or item["food_id"]
         if p["row"] is None:
             if discover:
                 ranked = sorted((c for c in cands if c["price_eur"] is not None),
-                                key=lambda c: -name_score(p["query"], c["product"]))[:discover]
-                for c in ranked:
+                                key=lambda c: -name_score(p["query"], c["product"]))
+                # The import format needs a pack size, so a hit without one could never be mapped in the app.
+                if ranked and not ranked[0]["pack_size_g"]:
+                    report.append(f"  ? {food}: skipped '{ranked[0]['product']}' (the store listing shows no pack size)")
+                for c in [c for c in ranked if c["pack_size_g"]][:discover]:
                     key = (c["ean"], c["product"])
                     if key in seen:
                         continue
@@ -370,44 +390,62 @@ def match_store(export, store, raw_items, today, discover=0):
         if key in seen:
             continue
         seen.add(key)
-        out.append(price_row(store, c, p["row"], today))
+        line = price_row(store, c, p["row"], today)
+        if line["pack_size_g"] is None:
+            report.append(f"  ! {food}: '{c['product']}' has no pack size in the store listing or your product table")
+            continue
+        out.append(line)
         report.append(f"  = {food}: {c['product']} €{c['price_eur']:.2f} ({how}{f' {score:.2f}' if how == 'name' else ''})")
     return out, report
 
 
 def price_row(store, c, row, today):
-    """One import row. The app matches on store + EAN, else store + exact product name, so:
-    - product-table row with an EAN: send that EAN (the app then refreshes the name from the store);
-    - row without an EAN: send the row's own product name so the name match hits, plus the scraped EAN,
-      which the app stores on the row for next time;
-    - no row (discovery): send what the store shows; the app lists it as unmatched for mapping."""
+    """One import row; "product" is always the name the store shows, so the app's table names the product the
+    price belongs to. The app matches store + EAN, then store + match_product, then store + product, so:
+    - product-table row with an EAN: send that EAN;
+    - row without an EAN: send the row's own name as match_product, plus the scraped EAN, which the app stores on
+      the row for next time;
+    - no row (discovery): the app lists it as unmatched for mapping."""
     row_ean = parse_ean((row or {}).get("ean"))
-    if row is None:
-        ean, product = c.get("ean", ""), c["product"]
-    elif row_ean:
-        ean, product = row_ean, c["product"]
-    else:
-        ean, product = c.get("ean", ""), row.get("product") or c["product"]
-    return {
-        "store": store,
-        "ean": ean,
-        "product": product,
+    out = {"store": store, "ean": row_ean or c.get("ean", ""), "product": c["product"]}
+    if row is not None and not row_ean and row.get("product"):
+        out["match_product"] = row["product"]
+    out.update({
         "pack_size_g": c.get("pack_size_g") or (row or {}).get("pack_size_g"),
         "price_eur": round(float(c["price_eur"]), 2),
         "promo": bool(c.get("promo")),
         "date": today,
-    }
+    })
+    return out
 
 
 # ---------------------------------------------------------------------------------------------
 # Apify API
 # ---------------------------------------------------------------------------------------------
 
+RETRY_WAIT_S = 5
+
+
 class ApifyError(Exception):
-    pass
+    def __init__(self, message, transient=False):
+        super().__init__(message)
+        self.transient = transient  # network trouble, a body that is not JSON, HTTP 429 or 5xx: worth one retry
 
 
 def _request(method, url, token, body=None, timeout=90):
+    """Call the Apify API and return the parsed JSON. Every failure is an ApifyError, so a store that fails never
+    ends the whole run. A GET is retried once after a transient failure; a POST is not, because it may already
+    have started (and billed) an actor run."""
+    for attempt in (1, 2):
+        try:
+            return _request_once(method, url, token, body, timeout)
+        except ApifyError as e:
+            if not e.transient or method != "GET" or attempt == 2:
+                raise
+            time.sleep(RETRY_WAIT_S)
+
+
+def _request_once(method, url, token, body, timeout):
     data = None if body is None else json.dumps(body).encode("utf-8")
     req = urllib.request.Request(url, data=data, method=method)
     req.add_header("Authorization", f"Bearer {token}")
@@ -416,16 +454,24 @@ def _request(method, url, token, body=None, timeout=90):
         req.add_header("Content-Type", "application/json")
     try:
         with urllib.request.urlopen(req, timeout=timeout) as resp:
-            return json.loads(resp.read().decode("utf-8") or "null")
+            raw = resp.read()
     except urllib.error.HTTPError as e:
         detail = e.read().decode("utf-8", "replace")[:300]
         hints = {401: "the API token is invalid", 402: "your Apify account has no credit for this actor",
                  403: "this token may not run the actor (rent/subscribe to it in the Apify Store first)",
                  404: "actor not found: check the actor ID", 429: "rate limited: wait and retry",
                  400: "the actor rejected the input (" + detail + "); set APIFY_INPUT_<STORE> to match its input schema"}
-        raise ApifyError(f"HTTP {e.code} for {url.split('?')[0]}: {hints.get(e.code, detail)}") from None
+        raise ApifyError(f"HTTP {e.code} for {url.split('?')[0]}: {hints.get(e.code, detail)}",
+                         transient=e.code == 429 or e.code >= 500) from None
     except urllib.error.URLError as e:
-        raise ApifyError(f"Network error calling Apify: {e.reason}") from None
+        raise ApifyError(f"Network error calling Apify: {e.reason}", transient=True) from None
+    except (OSError, http.client.HTTPException) as e:
+        # Timeouts and dropped connections while waiting for or reading the response are not wrapped in URLError.
+        raise ApifyError(f"Network error calling Apify: {type(e).__name__}: {e}", transient=True) from None
+    try:
+        return json.loads(raw.decode("utf-8") or "null")
+    except ValueError:
+        raise ApifyError(f"Apify sent a response that is not JSON for {url.split('?')[0]}", transient=True) from None
 
 
 def run_actor(actor_id, actor_input, token, timeout_s=900, log=print):
@@ -441,7 +487,8 @@ def run_actor(actor_id, actor_input, token, timeout_s=900, log=print):
     status = run.get("status")
     while status in (None, "READY", "RUNNING"):
         if time.time() > deadline:
-            raise ApifyError(f"{actor_id} still running after {timeout_s}s (run {run_id}); rerun later with --from-dataset")
+            raise ApifyError(f"{actor_id} still running after {timeout_s}s (run {run_id}). When it finishes, export dataset "
+                             f"{dataset} as JSON from the Apify console (Storage > Datasets) and rerun with --from-dataset STORE=FILE")
         info = _request("GET", f"{API}/actor-runs/{run_id}?waitForFinish=60", token, timeout=90)
         status = ((info or {}).get("data") or {}).get("status")
     if status != "SUCCEEDED":

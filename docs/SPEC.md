@@ -284,7 +284,7 @@ storeBreakdown(quantities, products, todayIso)
        cheapest: { items:[{foodId, store, row, packs, cost, leftoverG, stale}], total, missing:[foodId] } }
   // several rows for the same food+store: use the one with the lowest cost for the need.
 buildExport(quantities, products, foods, window:{start, end}, todayIso)
-  -> { generated, week:{start, end, label}, items:[{ food_id, food, weekly_g, unit_g,
+  -> { generated, week:{start, end, label}, items:[{ food_id, food, food_nl, weekly_g, unit_g,
         stores:{ Colruyt:[{ean, product, pack_size_g, url}], Delhaize:[...], Carrefour:[...] } }] }
 parseImport(text) -> {rows:[ImportRow], errors:[strings]}
    // ImportRow = {store, ean, product, pack_size_g, price_eur, promo, date}; validates types, store names

@@ -31,6 +31,7 @@
   const FRUIT_START_G = 150;
   const PRODUCE_GROW_G = 25;
   const MIN_PORTION_KCAL = 50;     // protein and carb items are generated at no less than ~50 kcal
+  const MIN_CARB_KCAL = { main: 150, breakfast: 80 };   // a real side of potatoes/rice/pasta, not a garnish
   const MAX_CORRECTION_STEPS = 600;
   const MAX_SEARCH_ROUNDS = 4;
   const MAX_SEARCH_EVALS = 150;    // bounds the food-choice search (each evaluation is a full day solve)
@@ -133,6 +134,15 @@
     const g = num(food.kcal) > 0 ? MIN_PORTION_KCAL / food.kcal * 100 : s;
     return Math.min(maxGrams(food), Math.max(1, Math.ceil(g / s - 1e-9)) * s);
   }
+  // Generated carb portion floor for a meal type (rescales and swaps keep the plain minimum, so a later cut can
+  // still take carbs lower).
+  // `budget` is the meal's share of the day's carb energy: the floor never takes more than 60 % of it.
+  function carbMin(food, type, budget) {
+    const s = stepOf(food);
+    const kcal = Math.max(MIN_PORTION_KCAL, Math.min(MIN_CARB_KCAL[type] || MIN_PORTION_KCAL, 0.6 * num(budget)));
+    const g = num(food.kcal) > 0 ? kcal / food.kcal * 100 : s;
+    return Math.min(maxGrams(food), Math.max(minPortion(food), Math.ceil(g / s - 1e-9) * s));
+  }
   function maxGrams(food) {
     const s = stepOf(food);
     return Math.max(1, Math.floor(food.maxPerMeal / s + 1e-9)) * s;
@@ -147,14 +157,24 @@
   // ---------- ranking and food choice ----------
   function per100kcal(food, x) { return num(food.kcal) > 0 ? x * 100 / food.kcal : 0; }
 
+  // Which fat sources suit a meal: lunch and dinner get a cooking fat (oil, avocado: nearly all fat, little
+  // protein); breakfast and snacks get nuts, seeds or nut butter. 1 = preferred, 0 = acceptable.
+  function fatSuits(food, type) {
+    const fatShare = num(food.kcal) > 0 ? food.fat * 9 / food.kcal : 0;
+    if (type === 'main') return fatShare >= 0.8 && food.protein < 5 ? 1 : 0;
+    if (type === 'breakfast') return food.category === 'fat' && food.protein >= 10 ? 1 : 0;
+    return 0;
+  }
+
   // Higher is better, compared lexicographically (SPEC §5 rule 4).
-  function rankKey(food, role) {
+  function rankKey(food, role, type) {
     if (role === 'protein') return [per100kcal(food, food.protein) + food.fill];
+    if (role === 'fat') return [fatSuits(food, type), food.fill, per100kcal(food, food.fibre)];
     return [food.fill, per100kcal(food, food.fibre)];
   }
 
-  function rankFoods(list, role) {
-    return list.map(function (f) { return { f: f, k: rankKey(f, role) }; }).sort(function (a, b) {
+  function rankFoods(list, role, type) {
+    return list.map(function (f) { return { f: f, k: rankKey(f, role, type) }; }).sort(function (a, b) {
       for (let i = 0; i < a.k.length; i++) if (a.k[i] !== b.k[i]) return b.k[i] - a.k[i];
       return a.f.id < b.f.id ? -1 : a.f.id > b.f.id ? 1 : 0;
     }).map(function (x) { return x.f; });
@@ -169,7 +189,7 @@
     ['breakfast', 'main'].forEach(function (type) {
       const lists = {};
       ['protein', 'carb', 'fat', 'produce'].forEach(function (role) {
-        lists[role] = rankFoods(allowed.filter(function (f) { return fits(f, role, type); }), role);
+        lists[role] = rankFoods(allowed.filter(function (f) { return fits(f, role, type); }), role, type);
       });
       const preferred = type === 'main' ? 'vegetable' : 'fruit';
       const pref = lists.produce.filter(function (f) { return f.category === preferred; });
@@ -184,11 +204,11 @@
     const used = {};
     return layout.map(function (L) {
       const inMeal = {};
-      function pick(list) {
+      function pick(list, repeatOk) {
         let best = null, bestUse = Infinity;
         list.forEach(function (f) {
           if (inMeal[f.id]) return;
-          const u = used[f.id] || 0;
+          const u = repeatOk ? 0 : used[f.id] || 0;
           if (u < bestUse) { best = f; bestUse = u; }
         });
         if (best) { inMeal[best.id] = true; used[best.id] = bestUse + 1; }
@@ -198,7 +218,7 @@
       const protein = pick(l.protein);
       const carb = pick(l.carb);
       const produce = pick(l.produce);
-      const fat = pick(l.fat);
+      const fat = pick(l.fat, true);
       return { protein: protein, carb: carb, produce: produce, fat: fat };
     });
   }
@@ -429,7 +449,7 @@
     const meals = layout.map(function (L, i) {
       const s = sel[i], items = [];
       if (s.protein) items.push(mkItem(s.protein, 'protein', 0, minPortion(s.protein)));
-      if (s.carb) items.push(mkItem(s.carb, 'carb', 0, minPortion(s.carb)));
+      if (s.carb) items.push(mkItem(s.carb, 'carb', 0, carbMin(s.carb, L.type, L.share * T.carbs * 4)));
       if (s.produce) {
         const start = s.produce.category === 'vegetable' ? VEG_START_G : FRUIT_START_G;
         const it = mkItem(s.produce, 'produce', 0, 0);
@@ -689,6 +709,28 @@
     }
     polish(used, Math.sign(dK), K, T1.kcal, dayVec(meals)[K], origin);
 
+    // 3. carb and fat foods carry protein too (a maintenance break adds ~25 g of it through potatoes, oats,
+    //    bread…). Hold the day's protein inside the aim by nudging the protein items, then put the energy that
+    //    moved back through carbs (then fat). A few passes settle both.
+    const snapshot = function (items) { return new Map(items.map(function (it) { return [it, it.grams]; })); };
+    for (let pass = 0; pass < 4; pass++) {
+      const pErr = T1.protein - dayVec(meals)[P];
+      if (Math.abs(pErr) <= PROTEIN_AIM_G) break;
+      const pro = byRole(meals, 'protein');
+      const po = snapshot(pro);
+      spread(pro, pErr, P, function (it) { return it.grams * it.v[P]; });
+      polish(pro, Math.sign(pErr), P, T1.protein, dayVec(meals)[P], po);
+      const kErr = T1.kcal - dayVec(meals)[K];
+      const eo = snapshot(carbs.concat(fats));
+      const rest = spread(carbs, kErr, K, function (it) { return it.grams * it.v[C]; });
+      let moved = carbs;
+      if (Math.abs(rest) > 1e-6 && Math.sign(rest) === Math.sign(kErr)) {
+        spread(fats, rest, K, function (it) { return it.grams * it.v[FA]; });
+        moved = carbs.concat(fats);
+      }
+      polish(moved, Math.sign(kErr), K, T1.kcal, dayVec(meals)[K], eo);
+    }
+
     const changes = [];
     out.meals.forEach(function (m, mi) {
       m.items.forEach(function (it, ii) {
@@ -734,7 +776,7 @@
         return after >= VEG_MIN || after >= before;
       });
     }
-    return rankFoods(list, item.role).map(function (f) { return f.id; });
+    return rankFoods(list, item.role, type).map(function (f) { return f.id; });
   }
 
   function swapFood(plan, foods, liked, excluded, mealKey, itemIndex, newFoodId) {

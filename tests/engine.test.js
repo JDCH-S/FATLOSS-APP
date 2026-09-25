@@ -820,9 +820,9 @@ test('projectBlockEnd: cut applies the weekly rate week by week from the Setup w
   const state = makeState();
   const p = E.projectBlockEnd(state, PS);
   assert.equal(p.fromWeight, 85);
-  close(p.weeks, 55 / 7);
+  close(p.weeks, 8);   // a whole 8-week block: counted to the Saturday morning after its last Friday dinner
   assert.equal(p.blockEnd, '2026-11-20');
-  close(p.weightKg, manualCut(85, 55 / 7), 1e-9);
+  close(p.weightKg, manualCut(85, 8), 1e-9);
   assert.ok(p.explanation.length >= 2);
   // Before the start the first block is projected from the program start.
   const pre = E.projectBlockEnd(state, '2026-09-20');
@@ -834,7 +834,7 @@ test('projectBlockEnd: trailing 7-day base needs 3 weigh-ins; breaks hold the we
   const state = makeState(null, logs);
   const p = E.projectBlockEnd(state, '2026-10-08');
   close(p.fromWeight, 84);
-  close(p.weeks, E.daysBetween('2026-10-08', '2026-11-20') / 7);
+  close(p.weeks, E.daysBetween('2026-10-08', '2026-11-21') / 7);
   close(p.weightKg, manualCut(84, p.weeks), 1e-9);
 
   delete logs['2026-10-06'];

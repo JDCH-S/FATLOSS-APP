@@ -714,7 +714,9 @@
       explanation.push('Final maintenance: weight held.');
       return { weightKg: fromWeight, fromWeight: fromWeight, weeks: 0, blockEnd: null, explanation: explanation };
     }
-    const weeks = Math.max(0, daysBetween(phase.type === 'pre' ? ps : todayIso, block.blockEnd) / 7);
+    // The block ends at Friday dinner, so its full effect shows on the next morning's weigh-in (Saturday):
+    // a whole 8-week cut counts as 8 weeks of loss.
+    const weeks = Math.max(0, daysBetween(phase.type === 'pre' ? ps : todayIso, addDays(block.blockEnd, 1)) / 7);
     let kg = fromWeight;
     if (block.type === 'cut') {
       const goal = calcGoalWeight(setup).value;

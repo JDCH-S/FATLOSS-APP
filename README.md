@@ -168,6 +168,15 @@ check-in or setting that was changed elsewhere in the meantime (the newer value 
 the app falls back to this browser's local storage; several tabs of it stay in sync too, and a tab left open
 never drops days or check-ins another tab saved. Setup → Backup exports or restores everything as one JSON file.
 
+## Known limits
+
+- Setup is saved as one record: if two tabs or devices change Setup within about a second of each other, the
+  later save wins. Daily entries and check-ins are saved one by one and never overwrite each other.
+- With 3 meals a day and a very high maintenance-break target, carb portions can go past the normal per-meal
+  size (up to 1.25×) or calories can fall short; the Meal Plan tab says so. More meals per day fixes it.
+- A food you won't eat stays in the plan only when nothing you like can replace it; it is then flagged and left
+  off the grocery list until you like an alternative or regenerate the plan.
+
 ## Development
 
 ```bash

@@ -76,7 +76,9 @@ state = {
   },
   logs: { 'YYYY-MM-DD': { weight: 84.2, kcal: 2100, protein: 180, steps: 9000 } }, // any field may be null
   checkins: { '<weekStart>': CheckinRecord },
-  plan: null | { base: Plan, weekGenerated: '<weekStart>' },
+  program: null | { snapshot: null | { programStart, takenOn, startWeightKg, week1: {kcal, protein, fat, carbs, limited,
+             tdeeBasis, tdeeSource, deficit, rate, weightUsed, targetLossKg, bmrFloorApplied, phaseType, explanation} } },
+  plan: null | { base: Plan, weekGenerated: '<weekStart>', history: { '<weekStart>': [{key, name, items:[{foodId, grams}]}] } },
   products: [ProductRow],       // starts as a copy of products.js seed
   priceMeta: { lastImport: null | 'YYYY-MM-DD', lastImportFile: null | string,
                lastImportSummary: null | {matched, updated, unmatched}, unmatched: [ImportRow] }
@@ -160,8 +162,14 @@ targetsForWeek(state, weekStart)
   //    Otherwise carry prev unchanged (source 'carry').
   //  * targetLossKg = cut ? rate × weightUsed : 0.
 latestLearned(state, beforeWeekStart) -> learned TDEE from the latest check-in before that week, else formula TDEE
-latestWeight(state, beforeWeekStart)  -> latest check-in avgWeight before that week, else setup.weightKg
-goalReachedWeek(state) -> earliest (record.weekStart + 7) among check-ins with goalReached, else null
+latestWeight(state, beforeWeekStart)  -> newest of: a logged week with ≥ 4 weigh-ins, a saved check-in average (logs win for
+                                        the same week); else setup.weightKg
+goalReachedWeek(state) -> programStart when the start weight is already at/below the goal; else the earliest
+                          (record.weekStart + 7) among check-ins with goalReached; else null
+makeProgramSnapshot(state, todayIso) -> snapshot | null    // null before the start or while Setup is incomplete
+   // The UI stores it in state.program.snapshot once the program has started (and replaces it when programStart
+   // changes). Week 1 then uses snapshot.week1 instead of live Setup values, and every week's protein is at least
+   // snapshot.week1.protein (protein is never reduced; any raise comes out of carbs, then fat).
 
 computeCheckin(state, weekStart) -> CheckinRecord   // pure; the UI saves it into state.checkins[weekStart]
 ```
@@ -177,7 +185,9 @@ learnedBefore = latestLearned(state, S)            // formula TDEE if no earlier
 thisT = targetsForWeek(state, S)
 targetLossKg = thisT.targetLossKg;  actualLossKg = prev.avgWeight − cur.avgWeight
 belowTarget  = thisT.phase.type === 'cut' && valid && actualLossKg < 0.7 × targetLossKg
-stall = belowTarget && state.checkins[S − 7]?.belowTarget === true      // 2 consecutive weeks
+prevBelowTarget = state.checkins[S − 7]?.belowTarget, or — when that check-in was never saved — the same test
+                  worked out from the logs (record.prevBelowTargetSource: 'checkin' | 'logs' | null)
+stall = belowTarget && prevBelowTarget                                   // 2 consecutive weeks
 diagnosis (only when stall), first match wins:
    cur.avgSteps < setup.steps × 0.85          → 'neat'      "NEAT drop — restore steps before cutting food"
    cur.intakeDays < 6                         → 'tracking'  "Tracking gap"
@@ -215,7 +225,9 @@ targetLine(state, fromIso, toIso) -> [{date, kg}]   // planned weight path from 
    // start = avg of the week before programStart if ≥ 4 weigh-ins else setup.weightKg; cut weeks lose the weekly
    // rate, break weeks flat; stops at goal weight. One point per day (linear within a week).
 programSummary(state, todayIso) -> { weekStart, phase, targets, blockEnd, projection, nextCheckinDate,
-   checkinDue: {weekStart, date} | null, goalWeight }
+   checkinDue: {weekStart, date} | null, goalWeight, explanation: [strings] }
+   // projectBlockEnd counts to the morning after the block's last Friday dinner (a whole cut = 8 weeks of loss).
+   // targetsForWeek / projectBlockEnd / programSummary all return explanation arrays with their numbers.
 ```
 
 ## 5. mealplan.js
@@ -241,7 +253,19 @@ swapFood(plan, foods, liked, excluded, mealKey, itemIndex, newFoodId) -> Plan
 planTotals(plan, foods) -> { day:{kcal,protein,carbs,fat,fibre}, meals:{[key]:{kcal,protein,carbs,fat,fibre}} }
 checkPlan(plan, foods, targets) -> { ok, kcalDiffPct, proteinDiffG, fibre, vegCount, fruitCount, issues:[strings] }
 roundGrams(food, grams) -> grams   // whole units if food.unit, else nearest 5 g (min one unit / 5 g)
+replaceDisallowed(plan, foods, liked, excluded)
+   -> { plan, replaced:[{mealKey, itemIndex, from, to}], dropped:[{mealKey, itemIndex, foodId}],
+        impossible:[{mealKey, itemIndex, foodId}] }   // swaps out won't-eat / un-liked / deleted foods, meal by meal
+limitDecimals(value, limit) -> 0..9   // decimals needed so a displayed value never looks like it is on the wrong side of a limit
 ```
+
+Additions made after review: normalizeFood fills custom-food defaults by category (meals, and gram/kcal caps per
+meal); lunch/dinner prefer a cooking fat (oil, avocado) and breakfast/snacks nuts, seeds or nut butter, and the fat
+source may repeat; generated carb portions have a meal-type floor (150 kcal main, 80 kcal breakfast/snack, at most
+60 % of the meal's carb budget); rescalePlan also holds protein within the aim by nudging protein items, restores fibre
+by growing produce, and in a maintenance break may stretch carb items to 1.25× their per-meal maximum (with a warning)
+once fat is +10 % over target; checkPlan warns when fat is more than 20 % above target; a repair pass reaches the
+published limits whenever a valid assignment with the same foods exists.
 
 Rules (acceptance criteria, tested):
 1. Only allowed foods. Each meal = exactly 1 protein-role food + 1 carb-role food + ≥ 1 produce item
@@ -284,28 +308,40 @@ storeBreakdown(quantities, products, todayIso)
        cheapest: { items:[{foodId, store, row, packs, cost, leftoverG, stale}], total, missing:[foodId] } }
   // several rows for the same food+store: use the one with the lowest cost for the need.
 buildExport(quantities, products, foods, window:{start, end}, todayIso)
-  -> { generated, week:{start, end, label}, items:[{ food_id, food, food_nl, weekly_g, unit_g,
+  -> { generated, week:{start, end, label}, items:[{ food_id, food, food_nl, weekly_g, unit_g, drained_ratio, g_per_ml,
         stores:{ Colruyt:[{ean, product, pack_size_g, url}], Delhaize:[...], Carrefour:[...] } }] }
 parseImport(text) -> {rows:[ImportRow], errors:[strings]}
-   // ImportRow = {store, ean, product, pack_size_g, price_eur, promo, date}; validates types, store names
+   // ImportRow = {store, ean, product, pack_size_g, price_eur, promo, date, match_product?}; validates types, store names
    // (case-insensitive → canonical), trims EAN.
 applyImport(products, rows, todayIso)
    -> {products, matched:[{row, productId}], unmatched:[row], summary:{matched, updated, unmatched}}
-   // match store + EAN (EAN non-empty); fallback store + normalized product name (lowercase, collapse spaces,
-   // strip accents). Matched rows update product name, packSizeG, price, promo, date (row.date || todayIso),
-   // source 'import'. Never mutate the input array.
+   // match store + EAN (leading zeros ignored, so GTIN-14 = EAN-13), then store + match_product, then store +
+   // normalized product name (lowercase, collapse spaces, strip accents). Matched rows take the store's product
+   // name, packSizeG, price, promo, date (row.date || todayIso), source 'import'. Never mutate the input array.
 mapImportRow(products, row, foodId) -> products   // adds a new ProductRow for an unmatched row
+mergeUnmatched(existing, incoming) -> list         // de-duplicated by store + barcode (or store + name), newest wins
+// Canned tuna, chickpeas and kidney beans are counted in drained grams everywhere (foods.drainedRatio); oil in grams
+// (foods.gPerMl 0.92).
 ```
 
 ## 7. store.js (persistence)
 
 * Uses `await window.claude?.use?.('db')` when available (the page declares the `db` capability with rules
   making all data owner-only). Documents:
-  `fl/setup`, `fl/program` (reserved), `fl/plan`, `fl/products` `{rows}`, `fl/pricemeta`, `fl/checkins`
-  `{records}`, `logs/<YYYY>` `{days: {iso: entry}}` (one document per calendar year).
+  `fl/setup`, `fl/program`, `fl/plan`, `fl/products` `{rows}`, `fl/pricemeta`, `checkins/<YYYY>` `{records}` and
+  `logs/<YYYY>` `{days: {iso: entry}}` (one document per calendar year; a legacy `fl/checkins` is migrated on load).
+* Logs and check-ins are written per entry with `update()` (a deleted entry is written as null), so a stale tab
+  can never overwrite newer entries; the other documents use `set()`. After load the store subscribes once to every
+  document/collection and `onRemote(fn(section, value))` fires when another tab or device changed something (the
+  value is already merged into the state object).
+* Failed writes retry with backoff and keep the 'error' status until they succeed; `flush()` writes everything
+  pending and runs on `pagehide` / when the page is hidden. If cloud reads fail at load, `load` returns
+  `readOnly: true` and nothing is written (so example data can never replace cloud data).
 * Fallback when db is null: `localStorage['fatloss-app-v1']` (whole state JSON), every access in try/catch.
-* `load() -> Promise<{state, backend: 'cloud'|'browser'|'memory'}>`; `save(section, state)` debounced (~600 ms)
-  per document, one write in flight per document; `onStatus(fn)` reports 'saving'|'saved'|'error'.
+* `load(defaults) -> Promise<{state, backend: 'cloud'|'browser'|'memory', error, readOnly, migrated}>`;
+  `save(section, state)` debounced (~600 ms) per document, one write in flight per document; sections 'setup',
+  'program', 'plan', 'products', 'priceMeta', 'checkins', 'logs'; `onStatus(fn(status, message))` reports
+  'saving' | 'saved' (only after the writes completed) | 'error'.
 * Backup: `exportAll(state) -> JSON string` `{app:'fatloss', version:1, exported, state}`;
   `importAll(text) -> state` (validates, fills missing sections with defaults).
 * Downloads: `download(filename, text)` uses `await window.claude?.use?.('downloads')` → `save({filename, data})`;
@@ -339,6 +375,11 @@ mapImportRow(products, row, foodId) -> products   // adds a new ProductRow for a
   mix, "Export grocery list", "Import prices" (file input), last import date, unmatched rows with a food select
   to map them, editable product table (add/edit/delete rows, reset to seed).
 * No `alert/confirm/prompt` (they are blocked in the artifact viewer): inline confirmations.
+* Rendering patches the live DOM in place (a small morph) so focus, half-typed dates and the clicked button survive a
+  re-render; date fields apply on blur or Enter.
+* The week before the program start is a baseline on the Check-in tab (week-1 targets come from Setup).
+* Marking a planned food "won't eat", un-liking it or deleting a custom food replaces it in the plan
+  (replaceDisallowed); changing meals per day regenerates the plan.
 * Theme tokens on `:root`, dark palette under `@media (prefers-color-scheme: dark)` guarded by
   `:root:not([data-theme="light"])` and repeated under `:root[data-theme="dark"]`; body background from a token;
   works at 400 px wide (tables in `overflow-x:auto` wrappers); visible focus states.

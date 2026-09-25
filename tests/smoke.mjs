@@ -105,6 +105,37 @@ if (await swapSel.count()) {
   }
 }
 
+// ---- Won't eat a planned food: the plan replaces it; meals per day regenerates the plan
+const st0 = await page.evaluate(() => JSON.parse(localStorage.getItem('fatloss-app-v1')));
+const planned = st0.plan.base.meals[1].items[0].foodId;
+await page.click('#tab-setup');
+await page.click(`#pref-${planned}-exclude`);
+await page.waitForTimeout(150);
+check('won\'t-eat food is replaced in the plan (message)', await page.locator('text=Meal plan updated').count() > 0);
+await page.waitForTimeout(700);
+const st1 = await page.evaluate(() => JSON.parse(localStorage.getItem('fatloss-app-v1')));
+check('won\'t-eat food is gone from the plan', !JSON.stringify(st1.plan.base).includes('"' + planned + '"'), planned);
+await page.click(`#pref-${planned}-like`);
+await page.click('#seg-mealsPerDay-5');
+await page.waitForTimeout(200);
+check('meals per day change regenerates the plan', await page.locator('text=regenerated with 5 meals').count() > 0);
+await page.click('#tab-plan');
+await page.waitForTimeout(120);
+check('plan now has 5 meals', (await page.locator('.meal-head').count()) === 5);
+await page.click('#tab-setup');
+await page.click('#seg-mealsPerDay-4');
+await page.waitForTimeout(150);
+// Protein never drops: lowering weight after the start keeps the week-1 protein
+const protBefore = await page.locator('#status-strip').textContent();
+await page.fill('#s-weight', '80');
+await page.press('#s-weight', 'Tab');
+await page.waitForTimeout(150);
+const protAfter = await page.locator('#status-strip').textContent();
+const pOf = (t) => (t.match(/P (\d+)/) || [])[1];
+check('protein target unchanged after lowering Setup weight', pOf(protBefore) === pOf(protAfter), pOf(protBefore) + ' vs ' + pOf(protAfter));
+await page.fill('#s-weight', '85');
+await page.press('#s-weight', 'Tab');
+
 // ---- Daily log: 14 days of data ending today
 await tab('log');
 const today = new Date();

@@ -47,6 +47,11 @@ Every number in the app shows its formula and inputs (Setup → Starting calcula
 | Stall | loss below 70 % of target for 2 weeks → steps down > 15 % vs Setup: "NEAT drop" (no cut); fewer than 6 of 7 days logged: "tracking gap" (no cut); otherwise "metabolic adaptation" (adjustment applied) |
 
 A diet week runs from Saturday dinner to Friday dinner; for dates the app uses Saturday–Friday calendar weeks.
+The week before the program start is a baseline: log weights then so the first check-in has a week to compare
+with. Week-1 targets come from Setup and are frozen when the program starts, so later Setup edits act through the
+next check-in instead of rewriting past weeks, and protein never drops below its week-1 value. Change the program
+start to restart with new numbers. A skipped check-in doesn't hide a stall: last week's result is then worked out
+from your logs.
 Each week needs at least 4 weigh-ins (and this week at least one logged calorie day) for an adaptive update;
 otherwise targets carry over.
 
@@ -61,7 +66,9 @@ Grams are solved to hit the day within ±5 % kcal and ±10 g protein, with at le
 1 fruit and 25 g fibre, rounded to 5 g or whole units. The generator prefers filling, high-protein foods.
 When targets change, the same meals are kept and only grams are rescaled (carbs first, then fat); maintenance
 breaks simply get larger carb portions. *Swap* replaces one food with another liked food of the same category
-and re-solves only that meal.
+and re-solves only that meal. Marking a planned food "won't eat" (or un-liking it, or deleting a custom food)
+replaces it automatically the same way; changing meals per day regenerates the plan. "Changes vs last week"
+compares with the plan you actually had last week, swaps included.
 
 ## Groceries and prices
 
@@ -136,7 +143,10 @@ EAN); importing the same suggestions again refreshes their price instead of addi
 ## Data and backups
 
 Inside claude.ai your data is stored in the artifact's database under your account, readable and writable only
-by you (the artifact's owner). It survives reloads, sessions and new versions of the app. Opened outside
+by you (the artifact's owner). It survives reloads, sessions and new versions of the app. Several open tabs or
+devices stay in sync: daily entries and check-ins are saved one by one, so an old tab never overwrites newer
+entries, and changes made elsewhere appear without reloading. If the saved data can't be read when the app opens,
+it says so and saves nothing until a reload succeeds. Opened outside
 claude.ai, the app falls back to this browser's local storage. Setup → Backup exports or restores everything
 as one JSON file.
 
@@ -144,6 +154,7 @@ as one JSON file.
 
 ```bash
 npm test      # node --test tests/*.test.js && python3 -m unittest discover -s price_script
+npm run smoke # headless Chromium: every tab end to end, plus two tabs against a fake cloud store
 ```
 
 The logic modules are pure and deterministic (no clock or randomness inside them), so they run unchanged in

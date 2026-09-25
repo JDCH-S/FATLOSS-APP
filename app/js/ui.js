@@ -78,6 +78,7 @@
       },
       logs: {},
       checkins: {},
+      program: null,
       plan: null,
       products: clone(SEED),
       priceMeta: { lastImport: null, lastImportFile: null, lastImportSummary: null, unmatched: [] }
@@ -123,6 +124,45 @@
       return fmt(n, n % 1 ? 1 : 0) + ' ' + esc(name) + ' <span class="muted">(' + fmt(grams) + ' g)</span>';
     }
     return fmt(grams) + ' g';
+  }
+
+  // Once the program has started, week 1's targets are frozen (the engine then never lowers protein and later
+  // Setup edits no longer rewrite past weeks). A new program start takes a new snapshot.
+  function ensureProgramSnapshot() {
+    const today = todayIso();
+    const ps = state.setup.programStart;
+    const snap = state.program && state.program.snapshot;
+    if (today < ps) {
+      if (snap) { state.program = Object.assign({}, state.program, { snapshot: null }); S.save('program', state); }
+      return;
+    }
+    if (snap && snap.programStart === ps) return;
+    const next = E.makeProgramSnapshot(state, today);
+    if (!next) return;
+    state.program = Object.assign({}, state.program || {}, { snapshot: next });
+    S.save('program', state);
+  }
+
+  // Replaces foods in the plan that are no longer allowed (won't eat, un-liked, deleted) and says what changed.
+  function cleanPlan(foodsOverride) {
+    if (!state.plan || !state.plan.base) return '';
+    const c = ctx();
+    const foods = foodsOverride || c.foods;
+    const res = M.replaceDisallowed(state.plan.base, foods, c.liked, c.excluded);
+    if (!res.replaced.length && !res.dropped.length && !res.impossible.length) return '';
+    const name = function (id) { return (foods[id] || {}).name || id; };
+    const meal = function (key) { const m = state.plan.base.meals.filter(function (x) { return x.key === key; })[0]; return m ? m.name : key; };
+    state.plan = Object.assign({}, state.plan, { base: res.plan });
+    recordPlanWeek(ctx());
+    S.save('plan', state);
+    const parts = res.replaced.map(function (r) { return meal(r.mealKey) + ': ' + name(r.from) + ' → ' + name(r.to); })
+      .concat(res.dropped.map(function (d) { return meal(d.mealKey) + ': ' + name(d.foodId) + ' removed'; }));
+    let text = parts.length ? 'Meal plan updated (' + parts.join('; ') + ').' : '';
+    if (res.impossible.length) {
+      text += (text ? ' ' : '') + 'No liked alternative for ' + unique(res.impossible.map(function (i) { return name(i.foodId); })).join(', ') +
+        ': like another food of that kind or regenerate the plan.';
+    }
+    return text;
   }
 
   // ---------- commit / render ----------
@@ -202,11 +242,12 @@
       const c = ctx();
       if (ui.logDraft && ui.logDraft.followToday && ui.logDraft.date !== c.today) resetDraft(c.today);
       renderHeader(c);
-      html = tab === 'setup' ? renderSetup(c)
+      html = (ui.loadError ? '<div class="banner ' + ui.loadError.kind + '" role="alert">' + esc(ui.loadError.text) + '</div>' : '') +
+        (tab === 'setup' ? renderSetup(c)
         : tab === 'log' ? renderLog(c)
           : tab === 'checkin' ? renderCheckin(c)
             : tab === 'plan' ? renderPlan(c)
-              : renderGroceries(c);
+              : renderGroceries(c));
     } catch (err) {
       html = '<div class="banner bad" role="alert">Something went wrong while drawing this tab: ' + esc(err && err.message) +
         '. Your data is safe. Check the Setup values (for example the program start date), restore a backup, or reload.</div>' +
@@ -239,10 +280,10 @@
     const T = sum.targets || {};
     const parts = [];
     if (ph.type === 'pre') {
-      const first = E.phaseForWeek(state.setup.programStart, state.setup.programStart, null);
+      const first = E.phaseForWeek(state.setup.programStart, state.setup.programStart, E.goalReachedWeek(state));
       parts.push('<span class="chip">Not started</span>');
       parts.push('<span><b>' + esc(first.label) + '</b> starts ' + esc(E.formatDate(state.setup.programStart)) + ' (dinner)</span>');
-      parts.push('<span>Week 1 of ' + first.blockLength + ', ends <b>' + esc(E.formatDate(first.blockEnd)) + '</b>, dinner</span>');
+      if (first.blockEnd) parts.push('<span>Week 1 of ' + first.blockLength + ', ends <b>' + esc(E.formatDate(first.blockEnd)) + '</b>, dinner</span>');
     } else {
       const cls = ph.type === 'cut' ? 'accent' : 'good';
       parts.push('<span class="chip ' + cls + '">' + esc(ph.label || '') + '</span>');
@@ -254,7 +295,7 @@
     }
     parts.push('<span>' + (ph.type === 'pre' ? 'Week-1 targets' : 'Today') + ' <b>' + fmt(T.kcal) + ' kcal</b> · P ' + fmt(T.protein) +
       ' · C ' + fmt(T.carbs) + ' · F ' + fmt(T.fat) + ' g</span>');
-    const how = (T.explanation || []).concat((sum.projection && sum.projection.explanation) || []);
+    const how = (sum.explanation || []).concat(T.explanation || [], (sum.projection && sum.projection.explanation) || []);
     if (how.length) {
       parts.push('<details class="how" id="hdr-how"' + (ui.open['hdr-how'] ? ' open' : '') + '><summary>How are these worked out?</summary><ul class="note">' +
         how.map(function (l) { return '<li>' + esc(l) + '</li>'; }).join('') + '</ul></details>');
@@ -378,7 +419,11 @@
       rows.map(function (r) {
         return '<tr><td>' + esc(r[0]) + '</td><td class="n"><b>' + esc(r[1]) + '</b></td><td class="formula">' + esc(r[2]) + '</td></tr>';
       }).join('') + '</tbody></table></div>' +
-      '<p class="note">Weeks 1–2 use this formula TDEE. From week 3 the weekly check-in uses your learned TDEE instead (see Weekly Check-in).</p>';
+      '<p class="note">Weeks 1–2 use this formula TDEE. From week 3 the weekly check-in uses your learned TDEE instead (see Weekly Check-in).</p>' +
+      (state.program && state.program.snapshot && state.program.snapshot.programStart === s.programStart
+        ? '<p class="note">Week-1 targets were fixed on ' + esc(dateLong(state.program.snapshot.takenOn)) + ', when the program started, so Setup changes no longer rewrite past weeks. ' +
+          'They take effect through the next check-in, and protein never drops below ' + fmt(state.program.snapshot.week1.protein) + ' g. To restart the program with new numbers, change the program start.</p>'
+        : '');
     return block('Starting calculations', body);
   }
 
@@ -473,6 +518,10 @@
       customField('cf-kcal', 'kcal', 'kcal') + customField('cf-protein', 'Protein (g)', 'protein') + customField('cf-carbs', 'Carbs (g)', 'carbs') +
       customField('cf-fat', 'Fat (g)', 'fat') + customField('cf-fibre', 'Fibre (g)', 'fibre') +
       customField('cf-unitg', 'Unit weight (g, optional)', 'unitGrams') + customField('cf-unitname', 'Unit name (optional)', 'unitName', 'text') +
+      '<label class="field" for="cf-meals">Suitable for<select id="cf-meals" data-custom="meals">' +
+      [['', 'Automatic (by category)'], ['both', 'Any meal'], ['breakfast', 'Breakfast and snacks'], ['main', 'Lunch and dinner']].map(function (o) {
+        return '<option value="' + o[0] + '"' + ((cf.meals || '') === o[0] ? ' selected' : '') + '>' + o[1] + '</option>';
+      }).join('') + '</select></label>' +
       '</div><div class="row"><button type="button" class="btn primary" id="cf-add" data-action="add-custom">Add food</button>' +
       '<span class="muted small">New custom foods are marked as liked.</span></div></div></details>';
 
@@ -916,11 +965,13 @@
     // summary
     const d = tot.day;
     const summ = '<div class="tscroll"><table><thead><tr><th></th><th class="n">Target</th><th class="n">Plan</th><th class="n">Difference</th><th>Check</th></tr></thead><tbody>' +
-      sumRow('Calories', T.kcal, d.kcal, ' kcal', Math.abs(chk.kcalDiffPct) <= 5, fmt(chk.kcalDiffPct, 1) + ' % (limit ±5 %)') +
-      sumRow('Protein', T.protein, d.protein, ' g', Math.abs(chk.proteinDiffG) <= 10, signed(chk.proteinDiffG, 0) + ' g (limit ±10 g)') +
+      sumRow('Calories', T.kcal, d.kcal, ' kcal', Math.abs(chk.kcalDiffPct) <= 5,
+        signed(chk.kcalDiffPct, Math.max(1, M.limitDecimals(chk.kcalDiffPct, (chk.kcalDiffPct < 0 ? -1 : 1) * 5))) + ' % (limit ±5 %)') +
+      sumRow('Protein', T.protein, d.protein, ' g', Math.abs(chk.proteinDiffG) <= 10,
+        signed(chk.proteinDiffG, M.limitDecimals(chk.proteinDiffG, (chk.proteinDiffG < 0 ? -1 : 1) * 10)) + ' g (limit ±10 g)') +
       sumRow('Carbs', T.carbs, d.carbs, ' g', null, '') +
       sumRow('Fat', T.fat, d.fat, ' g', null, '') +
-      sumRow('Fibre', 25, d.fibre, ' g', d.fibre >= 25, 'at least 25 g') +
+      sumRow('Fibre', 25, d.fibre, ' g', d.fibre >= 25, 'at least 25 g', M.limitDecimals(d.fibre, 25)) +
       '<tr><td>Vegetables / fruit</td><td class="n">≥ 2 / ≥ 1</td><td class="n">' + chk.vegCount + ' / ' + chk.fruitCount + '</td><td></td><td>' +
       okChip(chk.vegCount >= 2 && chk.fruitCount >= 1, 'different vegetables / fruit') + '</td></tr></tbody></table></div>';
 
@@ -965,8 +1016,8 @@
   }
   function unique(a) { return a.filter(function (x, i) { return a.indexOf(x) === i; }); }
   function okChip(ok, text) { return '<span class="chip ' + (ok ? 'good' : 'bad') + '">' + (ok ? '✓ ' : '✗ ') + esc(text) + '</span>'; }
-  function sumRow(label, target, actual, unit, ok, text) {
-    return '<tr><td>' + esc(label) + '</td><td class="n">' + fmt(target) + unit + '</td><td class="n">' + fmt(actual) + unit + '</td><td class="n">' + signed(actual - target, 0) + unit +
+  function sumRow(label, target, actual, unit, ok, text, dec) {
+    return '<tr><td>' + esc(label) + '</td><td class="n">' + fmt(target) + unit + '</td><td class="n">' + fmt(actual, dec || 0) + unit + '</td><td class="n">' + signed(actual - target, dec || 0) + unit +
       '</td><td>' + (ok == null ? '' : okChip(ok, text)) + '</td></tr>';
   }
   function planDiff(c, a, b, ta, tb, estimated) {
@@ -1164,6 +1215,15 @@
       let v = el.dataset.value;
       if (f === 'mealsPerDay') v = Number(v);
       state.setup[f] = v;
+      if (f === 'mealsPerDay' && state.plan && state.plan.base && state.plan.base.mealsPerDay !== v) {
+        const c = ctx();
+        const T = E.targetsForWeek(state, c.weekNow);
+        const plan = M.generatePlan({ foods: c.foods, liked: c.liked, excluded: c.excluded, targets: macros(T), mealsPerDay: v });
+        state.plan = { base: plan, weekGenerated: c.weekNow, history: state.plan.history || {} };
+        recordPlanWeek(ctx());
+        S.save('plan', state);
+        ui.setupNote = 'Meals per day is now ' + v + ': the meal plan was regenerated with ' + v + ' meals (swaps were reset).';
+      }
       commit('setup');
     },
     'toggle-day': function (el) {
@@ -1182,6 +1242,7 @@
       s.excludedFoods = (s.excludedFoods || []).filter(function (x) { return x !== id; });
       if (v === 'like') s.likedFoods.push(id);
       if (v === 'exclude') s.excludedFoods.push(id);
+      ui.setupNote = cleanPlan() || null;
       commit('setup');
     },
     'add-custom': addCustomFood,
@@ -1268,14 +1329,19 @@
       else if (cf.kind === 'deleteProduct') { state.products = state.products.filter(function (r) { return r.id !== cf.key; }); commit('products'); }
       else if (cf.kind === 'deleteCustom') {
         const s = state.setup;
-        s.customFoods = (s.customFoods || []).filter(function (f) { return f.id !== cf.key; });
         s.likedFoods = (s.likedFoods || []).filter(function (x) { return x !== cf.key; });
         s.excludedFoods = (s.excludedFoods || []).filter(function (x) { return x !== cf.key; });
+        // Replace it in the plan while its macros are still known, then drop it.
+        ui.setupNote = cleanPlan() || null;
+        s.customFoods = (s.customFoods || []).filter(function (f) { return f.id !== cf.key; });
         commit('setup');
       } else if (cf.kind === 'importBackup' && ui.pendingBackup) {
         state = ui.pendingBackup.state; ui.pendingBackup = null;
         ui.backupMsg = { kind: 'good', text: 'Backup restored.' };
-        S.saveAll(state);
+        S.saveAll(state).then(function (ok) {
+          if (!ok) { ui.backupMsg = { kind: 'bad', text: 'The backup is loaded on this page but could not be saved. Check the save status at the top and try again.' }; scheduleRender(); }
+        });
+        ensureProgramSnapshot();
         scheduleRender();
       }
     }
@@ -1311,6 +1377,7 @@
       fibre: isNum(nums.fibre) ? nums.fibre : 0, unit: isNum(unitG) ? { name: String(cf.unitName || 'unit').trim() || 'unit', grams: unitG } : null,
       custom: true, source: 'Custom (entered in Setup)'
     };
+    if (cf.meals) food.meals = cf.meals === 'both' ? ['breakfast', 'main'] : [cf.meals];
     s.customFoods = (s.customFoods || []).concat([food]);
     s.likedFoods = (s.likedFoods || []).concat([id]);
     ui.custom = {}; ui.customErr = null;
@@ -1392,7 +1459,7 @@
       state.products = res.products;
       state.priceMeta = Object.assign({}, state.priceMeta, {
         lastImport: c.today, lastImportFile: f.name, lastImportSummary: res.summary,
-        unmatched: ((state.priceMeta && state.priceMeta.unmatched) || []).concat(res.unmatched)
+        unmatched: G.mergeUnmatched((state.priceMeta && state.priceMeta.unmatched) || [], res.unmatched)
       });
       ui.importMsg = { kind: res.unmatched.length ? 'warn' : 'good', text: 'Imported ' + f.name + ': ' + res.summary.matched + ' rows matched, ' + res.summary.updated + ' products updated, ' +
         res.summary.unmatched + ' unmatched' + (res.unmatched.length ? ' (map them below)' : '') + '.' };
@@ -1437,6 +1504,7 @@
     if (sat !== v) ui.setupNote = 'Diet weeks start on Saturday, so the program start moved to ' + E.formatDate(sat) + '.';
     state.setup.programStart = sat;
     commit('setup');
+    ensureProgramSnapshot();
   }
 
   function editProduct(el) {
@@ -1515,6 +1583,7 @@
     tab = name;
     ui.confirm = null;
     if (name === 'log') { resetDraft(todayIso()); ui.logMsg = null; }
+    if (state && !ui.readOnly) ensureProgramSnapshot();
     if ((name === 'plan' || name === 'groceries') && state && recordPlanWeek(ctx())) S.save('plan', state);
     try { root.history.replaceState(null, '', '#' + name); } catch (e) { /* sandboxed */ }
     render();
@@ -1535,10 +1604,18 @@
     const res = await S.load(defaultState());
     state = res.state;
     backend = res.backend;
+    ui.readOnly = !!res.readOnly;
+    if (res.error) {
+      ui.loadError = res.readOnly
+        ? { kind: 'bad', text: res.error + ' Nothing you change now is saved. Reload the page to try again.' }
+        : { kind: 'warn', text: res.error };
+    }
     // Keep the program start on a Saturday even if older data says otherwise.
     if (state.setup.programStart && E.dayOfWeek(state.setup.programStart) !== 6) state.setup.programStart = E.nextSaturdayOnOrAfter(state.setup.programStart);
     if (!state.products || !state.products.length) state.products = clone(SEED);
-    setSaveState('saved');
+    // Another tab or device changed something: the store has already merged it into `state`.
+    if (S.onRemote) S.onRemote(function () { scheduleRender(); });
+    if (res.readOnly) setSaveState('error', 'Not saving: ' + res.error); else { setSaveState('saved'); ensureProgramSnapshot(); }
     setTab(tab);
   }
 

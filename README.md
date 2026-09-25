@@ -77,8 +77,8 @@ The build environment could not reach the store websites, Open Food Facts or Api
 ran out part-way, so the seed table is a starting point, not verified shelf data:
 
 - **Colruyt and Delhaize**: product names and product-page links come from store pages that showed up in web
-  search results. EANs are filled in only where an Open Food Facts entry clearly matched (8 rows).
-- **Carrefour**: typical own-brand shelf names, not checked against carrefour.be.
+  search results. EANs are filled in only where an Open Food Facts entry clearly matched (15 rows).
+- **Carrefour**: typical own-brand shelf names, not checked against carrefour.be (quinoa comes from an Open Food Facts entry).
 - **Prices**: estimates, or search-result prices with unknown dates. None has a price date, so every row is
   flagged until your first import.
 
@@ -93,13 +93,16 @@ python3 price_script/fetch_prices.py grocery-list-2026-10-03.json -o prices-2026
 ```
 
 - Needs only Python 3.9+ (standard library).
-- One Apify actor per store (defaults: `studio-amba/colruyt-scraper`, `harvestedge/delhaize-supermarket-scraper`,
-  `harvestedge/carrefour-belgium`). Before running, the script reads each actor's input schema from the Apify
-  API and fills its search and max-items fields, so it adapts to the actor. Check the input it will send with
-  `--dry-run`.
+- One Apify actor per store. Defaults are Harvest Edge's Belgian scrapers: `harvestedge/colruyt-supermarket-be`
+  (returns GTINs), `harvestedge/delhaize-supermarket-scraper` and `harvestedge/carrefour-belgium`.
+  `studio-amba/colruyt-scraper` is an alternative for Colruyt. Their input field names could not be confirmed
+  from the build environment, so before the first run the script reads each actor's input schema from the
+  Apify API and fills its search and max-results fields (one run per query when the actor takes a single search
+  string). Check what it will send with `--dry-run`.
 - Override an actor or its input without editing the file:
   `APIFY_ACTOR_DELHAIZE=user/actor` and `APIFY_INPUT_DELHAIZE='{"queries": {queries}, "maxItems": {max_items}}'`.
-- Matching: EAN first, then product name plus pack size. For foods with no product row at a store,
+- Matching: EAN first, then the store product code in the product URL (Delhaize exposes no EANs), then product
+  name plus pack size. For foods with no product row at a store,
   `--discover 1` (default) adds the best search hit; the app lists it as unmatched so you can map it.
 - `--save-raw DIR` keeps the raw datasets and `--from-dataset Colruyt=file.json` reprocesses them without new runs.
 - Some actors are paid, and the runs are billed to your Apify account.

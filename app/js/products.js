@@ -2,8 +2,8 @@
  * Built on 2026-09-25 from web-search results. Store sites, Open Food Facts and Apify could not be fetched
  * from the build environment, so:
  *  - Colruyt and Delhaize product names and URLs come from store pages that appeared in search results;
- *    EANs are filled in only where an Open Food Facts entry clearly matched (8 rows).
- *  - Carrefour rows are unverified typical shelf names (the search budget ran out).
+ *    EANs are filled in only where an Open Food Facts entry clearly matched (15 rows).
+ *  - Carrefour rows are unverified typical shelf names (the search budget ran out), except quinoa (from OFF).
  *  - Every price is an estimate or a search-result price with an unknown date (source 'seed'), and no row has
  *    a price date, so the app flags them all "run price script" until real prices are imported.
  * Pack sizes are grams: eggs = count × 55 g, liquids 1 ml = 1 g, oil 0.92 g/ml, loose produce per kg = 1000 g.
@@ -228,28 +228,28 @@
     "store": "Colruyt",
     "foodId": "skyr",
     "product": "BONI Skyr natuur 500g",
-    "ean": "",
+    "ean": "5400141571738",
     "packSizeG": 500,
     "price": 1.29,
     "promo": false,
     "date": null,
     "source": "seed",
     "url": "https://www.colruyt.be/nl/producten/15457",
-    "note": "Pack: 500 g. Price seen in a search result, date unknown (supermarktprijzen.be result title 'Skyr natuur 500g | 1.29 EUR | BONI' (date of price not shown), seen 2026-09-25). 0% fat: promotiez.be lists it as 'Boni selection skyr natuur 0 % v.g.'."
+    "note": "Pack: 500 g. Price seen in a search result, date unknown (supermarktprijzen.be result title 'Skyr natuur 500g | 1.29 EUR | BONI' (date of price not shown), seen 2026-09-25). 0% fat: promotiez.be lists it as 'Boni selection skyr natuur 0 % v.g.'. EAN from the Open Food Facts entry “Skyr - Boni Selection - 500 g”, matched by name and pack size, not checked on the shelf."
   },
   {
     "id": "colruyt-quark",
     "store": "Colruyt",
     "foodId": "quark",
     "product": "BONI verse kaas 0%vg",
-    "ean": "",
+    "ean": "5400141772708",
     "packSizeG": 500,
     "price": 1.39,
     "promo": false,
     "date": null,
     "source": "estimate",
     "url": "https://www.colruyt.be/nl/producten/26267",
-    "note": "Pack: 500 g. Price is an estimate. The 500 g pack size is assumed (typical; not seen). Also seen: BONI Verse kaas mager (17054) and BONI BIO verse kaas 0%vg (33742). Price is an estimate."
+    "note": "Pack: 500 g. Price is an estimate. The 500 g pack size is assumed (typical; not seen). Also seen: BONI Verse kaas mager (17054) and BONI BIO verse kaas 0%vg (33742). Price is an estimate. EAN from the Open Food Facts entry “BONI Verse kaas mager - 500 g”, matched by name and pack size, not checked on the shelf."
   },
   {
     "id": "colruyt-cottage",
@@ -508,42 +508,42 @@
     "store": "Colruyt",
     "foodId": "chickpeas",
     "product": "BONI PLAN'T kikkererwten",
-    "ean": "",
+    "ean": "5400141486124",
     "packSizeG": 130,
     "price": 0.43,
     "promo": false,
     "date": null,
     "source": "seed",
     "url": "https://www.colruyt.be/nl/producten/14476",
-    "note": "Pack: 200 g (uitgelekt ca. 130 g). Price seen in a search result, date unknown (WebSearch snippet for colruyt.be/nl/producten/14476: 0,43/st (3,31/kg), seen 2026-09-25). Canned. The 130 g drained weight is worked out from the price (€0.43 ÷ €3.31/kg); the Collect&Go title says 200g. Pack size is not fully verified. BONI kikkererwten 500g (32060) appears to be dried."
+    "note": "Pack: 200 g (uitgelekt ca. 130 g). Price seen in a search result, date unknown (WebSearch snippet for colruyt.be/nl/producten/14476: 0,43/st (3,31/kg), seen 2026-09-25). Canned. The 130 g drained weight is worked out from the price (€0.43 ÷ €3.31/kg); the Collect&Go title says 200g. Pack size is not fully verified. BONI kikkererwten 500g (32060) appears to be dried. EAN from the Open Food Facts entry “Kikkererwten - Boni Plant - 200 g”, matched by name and pack size, not checked on the shelf."
   },
   {
     "id": "colruyt-kidney_beans",
     "store": "Colruyt",
     "foodId": "kidney_beans",
     "product": "BONI PLAN'T rode bonen blik 400g",
-    "ean": "",
+    "ean": "5400141278422",
     "packSizeG": 250,
     "price": 0.69,
     "promo": false,
     "date": null,
     "source": "estimate",
     "url": "https://www.colruyt.be/nl/producten/11016",
-    "note": "Pack: 400 g (uitgelekt 250 g). Price is an estimate. Product finder lists it as '11016-rode-kidneybonen-400-g-boni-selection'; a Collect&Go title mentions 250g, assumed to be the drained weight. Price is an estimate."
+    "note": "Pack: 400 g (uitgelekt 250 g). Price is an estimate. Product finder lists it as '11016-rode-kidneybonen-400-g-boni-selection'; a Collect&Go title mentions 250g, assumed to be the drained weight. Price is an estimate. EAN from the Open Food Facts entry “Rode kidneybonen - Boni - 400 g”, matched by name and pack size, not checked on the shelf."
   },
   {
     "id": "colruyt-lentils_red",
     "store": "Colruyt",
     "foodId": "lentils_red",
     "product": "BONI PLAN'T Rode linzen 500g",
-    "ean": "",
+    "ean": "5400141843484",
     "packSizeG": 500,
     "price": 1.99,
     "promo": false,
     "date": null,
     "source": "estimate",
     "url": "https://www.colruyt.be/nl/producten/10713",
-    "note": "Pack: 500 g. Price is an estimate. Dry lentils. Price is an estimate."
+    "note": "Pack: 500 g. Price is an estimate. Dry lentils. Price is an estimate. EAN from the Open Food Facts entry “Rode linzen - Boni Selection - 500 g”, matched by name and pack size, not checked on the shelf."
   },
   {
     "id": "colruyt-broccoli",
@@ -1096,14 +1096,14 @@
     "store": "Delhaize",
     "foodId": "scampi",
     "product": "Delhaize | Scampi's | Rauw | Gepeld | Natuur",
-    "ean": "",
+    "ean": "5400601065081",
     "packSizeG": 200,
     "price": 6.99,
     "promo": false,
     "date": null,
     "source": "estimate",
     "url": "https://www.delhaize.be/nl/shop/Vlees-vis-en-vegetarische-producten/Vis/Zeevruchten-en-schaaldieren/Scampi-s-en-gamba-s/Scampi-s-Rauw-Gepeld-Natuur/p/F2023081400124490000",
-    "note": "Pack: 200 gr. Price is an estimate. Pack size unverified. Cooked peeled scampi are also sold (F2019052700038510000)."
+    "note": "Pack: 200 gr. Price is an estimate. Pack size unverified. Cooked peeled scampi are also sold (F2019052700038510000). EAN from the Open Food Facts entry “Scampi - Delhaize - 200 g”, matched by name and pack size, not checked on the shelf."
   },
   {
     "id": "delhaize-eggs",
@@ -1560,7 +1560,7 @@
     "product": "Delhaize | Wortelen | 1 kg",
     "ean": "",
     "packSizeG": 1000,
-    "price": 1.0,
+    "price": 1,
     "promo": false,
     "date": null,
     "source": "seed",
@@ -2411,15 +2411,15 @@
     "id": "carrefour-quinoa",
     "store": "Carrefour",
     "foodId": "quinoa",
-    "product": "Quinoa",
-    "ean": "",
-    "packSizeG": 500,
-    "price": 3.49,
+    "product": "Carrefour Bio Quinoa 400 g",
+    "ean": "3560070826391",
+    "packSizeG": 400,
+    "price": 3.29,
     "promo": false,
     "date": null,
     "source": "estimate",
     "url": "",
-    "note": "Pack: 500 g. Unverified: typical Carrefour shelf name (store search was unavailable when this table was built). Price is an estimate. Run the price script to replace this row."
+    "note": "Pack: 400 g. Product and EAN from an Open Food Facts entry listing Carrefour as the store; not checked on carrefour.be. Price is an estimate."
   },
   {
     "id": "carrefour-wraps_wholewheat",

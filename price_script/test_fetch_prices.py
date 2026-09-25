@@ -105,6 +105,18 @@ class MatchingTests(unittest.TestCase):
         none, _, _ = fp.best_match({"ean": "", "product": "Volkoren pasta"}, cands)
         self.assertIsNone(none)
 
+    def test_product_code_match(self):
+        self.assertEqual(fp.store_code("https://www.delhaize.be/nl/shop/Zuivel/Verse-kaas-Mager/p/F2016122000141400000"), "F2016122000141400000")
+        self.assertEqual(fp.store_code("https://www.colruyt.be/nl/producten/26267"), "26267")
+        self.assertEqual(fp.store_code("https://www.carrefour.be/nl/opgeklopte-specialiteit-2-x-125-g/00654629.html"), "00654629")
+        self.assertEqual(fp.store_code("https://example.org/x"), "")
+        cands = [{"ean": "", "product": "Delhaize | Verse kaas | Mager", "price_eur": 1.49, "pack_size_g": 500,
+                  "url": "https://www.delhaize.be/nl/shop/x/p/F2016122000141400000"},
+                 {"ean": "", "product": "Delhaize Verse kaas mager 0%", "price_eur": 1.19, "pack_size_g": 500, "url": ""}]
+        row = {"ean": "", "product": "Delhaize Verse kaas mager 0%", "url": "https://www.delhaize.be/nl/shop/Zuivel/p/F2016122000141400000"}
+        c, score, how = fp.best_match(row, cands)
+        self.assertEqual((how, c["price_eur"]), ("product code", 1.49))
+
     def test_build_queries(self):
         q, plan = fp.build_queries(EXPORT, "Colruyt")
         self.assertEqual(q, ["Boni Skyr natuur", "Boni vrije uitloop eieren"])
@@ -231,7 +243,7 @@ class ApiAndCliTests(unittest.TestCase):
         with mock.patch.dict(os.environ, {}, clear=True):
             runs, how = fp.resolve_inputs("Colruyt", "a/b", build, ["x"], 4, None, log=lambda *a: None)
             self.assertEqual(how, "built-in default")
-            self.assertEqual(runs, [({"searchTerms": ["x"], "maxItems": 4}, None)])
+            self.assertEqual(runs, [({"keyterms": ["x"], "maxResults": 4}, None)])
             with mock.patch.object(fp, "fetch_input_schema", return_value={"properties": {"keywords": {"type": "array"}}}):
                 runs, how = fp.resolve_inputs("Colruyt", "a/b", build, ["x"], 4, "tok", log=lambda *a: None)
             self.assertEqual((runs, how), ([({"keywords": ["x"]}, None)], "actor input schema"))

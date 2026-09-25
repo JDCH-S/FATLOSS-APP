@@ -60,19 +60,21 @@ def _search_input(field, max_field="maxItems", extra=None):
 
 
 STORE_CONFIG = {
+    # Defaults are Harvest Edge's Belgian actors: the Colruyt one returns GTINs. Their field names below are the
+    # author's convention; before each run the script reads the actor's real input schema and uses that instead.
     "Colruyt": {
-        "actor": "studio-amba/colruyt-scraper",
-        "input": _search_input("searchTerms"),
-        "note": "colruyt.be (Collect&Go catalogue)",
+        "actor": "harvestedge/colruyt-supermarket-be",
+        "input": _search_input("keyterms", "maxResults"),
+        "note": "colruyt.be; alternative: studio-amba/colruyt-scraper (searchQuery, one query per run)",
     },
     "Delhaize": {
         "actor": "harvestedge/delhaize-supermarket-scraper",
-        "input": _search_input("searchTerms"),
-        "note": "delhaize.be",
+        "input": _search_input("keyterms", "maxResults"),
+        "note": "delhaize.be; the platform exposes no EAN, so matching uses the product code in the URL or the name",
     },
     "Carrefour": {
         "actor": "harvestedge/carrefour-belgium",
-        "input": _search_input("searchTerms"),
+        "input": _search_input("keyterms", "maxResults"),
         "note": "carrefour.be",
     },
 }
@@ -254,14 +256,36 @@ def name_score(a, b):
     return 0.5 * jacc + 0.5 * seq
 
 
+_CODE_PATTERNS = (
+    r"delhaize\.be/.*/p/(F\d+)",          # Delhaize: .../p/F2016122000141400000
+    r"colruyt\.be/.*/producten/(\d+)",     # Colruyt: /nl/producten/26267
+    r"carrefour\.be/.*/(\d{6,10})\.html",  # Carrefour: .../00654629.html
+)
+
+
+def store_code(url):
+    """The store's own product id from a product URL, or ''."""
+    for pat in _CODE_PATTERNS:
+        m = re.search(pat, str(url or ""), re.I)
+        if m:
+            return m.group(1).upper()
+    return ""
+
+
 def best_match(row, candidates, min_score=0.55):
-    """Pick the scraped product for one product-table row: exact EAN, else best name (+ pack size)."""
+    """Pick the scraped product for one product-table row: exact EAN, then the store's product code from the
+    URL, else the best name (+ pack size) match."""
     ean = parse_ean(row.get("ean"))
     usable = [c for c in candidates if c.get("price_eur") is not None]
     if ean:
         for c in usable:
             if c["ean"] == ean:
                 return c, 1.0, "ean"
+    code = store_code(row.get("url"))
+    if code:
+        for c in usable:
+            if store_code(c.get("url")) == code:
+                return c, 1.0, "product code"
     best, best_s = None, 0.0
     for c in usable:
         if ean and c["ean"] and c["ean"] != ean:
@@ -347,7 +371,7 @@ def match_store(export, store, raw_items, today, discover=0):
             continue
         seen.add(key)
         out.append(price_row(store, c, p["row"], today))
-        report.append(f"  = {food}: {c['product']} €{c['price_eur']:.2f} ({how}{'' if how == 'ean' else f' {score:.2f}'})")
+        report.append(f"  = {food}: {c['product']} €{c['price_eur']:.2f} ({how}{f' {score:.2f}' if how == 'name' else ''})")
     return out, report
 
 
@@ -439,8 +463,8 @@ def actor_for(store):
 
 
 # Input fields recognised in an actor's input schema, most specific first.
-SEARCH_KEYS = ("searchTerms", "searchQueries", "queries", "keywords", "searchKeywords", "search", "searchQuery",
-               "query", "keyword", "searchTerm", "terms", "searchStrings")
+SEARCH_KEYS = ("keyterms", "keyTerms", "searchTerms", "searchQueries", "queries", "keywords", "searchKeywords", "search",
+               "searchQuery", "query", "keyword", "searchTerm", "terms", "searchStrings")
 MAX_KEYS = ("maxItems", "maxResults", "maxProducts", "maxItemsPerQuery", "maxResultsPerQuery", "maxProductsPerQuery",
             "resultsPerQuery", "maxResultsPerSearch", "limit", "resultsLimit")
 

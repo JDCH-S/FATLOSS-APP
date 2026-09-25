@@ -124,7 +124,7 @@ as one JSON file.
 ## Development
 
 ```bash
-npm test      # node --test tests/ && python3 -m unittest discover -s price_script
+npm test      # node --test tests/*.test.js && python3 -m unittest discover -s price_script
 ```
 
 The logic modules are pure and deterministic (no clock or randomness inside them), so they run unchanged in

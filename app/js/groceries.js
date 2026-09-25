@@ -60,14 +60,19 @@
   // imported, mapped or hand-entered price beats a cheaper estimate or an old price. Only when no priced row is
   // current does the cheapest stale row count (its line keeps the stale flag). Rows without a usable price lose to
   // rows with one; on equal cost the earlier row wins.
+  // How trustworthy a row's price is: 0 current, 1 a real (imported or entered) price older than 7 days,
+  // 2 an estimate or undated price. A more trustworthy price wins; within the same rank the cheaper one does.
+  function priceRank(r, todayIso) {
+    const st = isStale(r, todayIso);
+    if (!st.stale) return 0;
+    return st.reason === 'older than 7 days' ? 1 : 2;
+  }
   function bestRow(rows, needG, todayIso) {
     let best = null;
     rows.forEach(function (r) {
       const p = packsFor(needG, r);
-      const c = { row: r, p: p, fresh: p.cost !== null && !isStale(r, todayIso).stale };
-      if (!best) { best = c; return; }
-      if (p.cost === null) return;
-      if (best.p.cost === null || (c.fresh && !best.fresh) || (c.fresh === best.fresh && p.cost < best.p.cost)) best = c;
+      const c = { row: r, p: p, rank: p.cost === null ? 3 : priceRank(r, todayIso) };
+      if (!best || c.rank < best.rank || (c.rank === best.rank && p.cost !== null && p.cost < best.p.cost)) best = c;
     });
     return best;
   }

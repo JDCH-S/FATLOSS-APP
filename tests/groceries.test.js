@@ -371,3 +371,15 @@ test('mergeUnmatched lists each store + barcode (or store + name) once, newest r
   assert.equal(G.mergeUnmatched(existing.concat(existing, [null]), []).length, 2);
   assert.deepEqual(G.mergeUnmatched(null, null), []);
 });
+
+test('a real price older than 7 days still beats an undated estimate', function () {
+  const q = [{ foodId: 'skyr', grams: 1350, perMeal: [] }];
+  const rows = [
+    row('d-est', 'Delhaize', 'skyr', 500, 2.49, { source: 'estimate', date: null }),
+    row('d-imp', 'Delhaize', 'skyr', 450, 2.79, { source: 'import', date: '2026-09-17' })
+  ];
+  assert.equal(G.storeBreakdown(q, rows, '2026-09-24').stores.Delhaize.items[0].row.id, 'd-imp', 'current import');
+  const later = G.storeBreakdown(q, rows, '2026-09-25').stores.Delhaize.items[0];
+  assert.equal(later.row.id, 'd-imp', 'stale import still preferred over the estimate');
+  assert.equal(later.stale.reason, 'older than 7 days');
+});

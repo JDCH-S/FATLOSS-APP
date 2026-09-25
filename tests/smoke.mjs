@@ -141,16 +141,6 @@ check('plan now has 5 meals', (await page.locator('.meal-head').count()) === 5);
 await page.click('#tab-setup');
 await page.click('#seg-mealsPerDay-4');
 await page.waitForTimeout(150);
-// Protein never drops: lowering weight after the start keeps the week-1 protein
-const protBefore = await page.locator('#status-strip').textContent();
-await page.fill('#s-weight', '80');
-await page.press('#s-weight', 'Tab');
-await page.waitForTimeout(150);
-const protAfter = await page.locator('#status-strip').textContent();
-const pOf = (t) => (t.match(/P (\d+)/) || [])[1];
-check('protein target unchanged after lowering Setup weight', pOf(protBefore) === pOf(protAfter), pOf(protBefore) + ' vs ' + pOf(protAfter));
-await page.fill('#s-weight', '85');
-await page.press('#s-weight', 'Tab');
 
 // ---- Daily log: 14 days of data ending today
 await tab('log');
@@ -171,6 +161,19 @@ check('log rows saved (non-round numbers)', await page.locator('text=Saved').cou
 await page.waitForTimeout(900); // saves are debounced
 check('14 days stored', await page.evaluate(() => { try { return Object.keys(JSON.parse(localStorage.getItem('fatloss-app-v1')).logs).length; } catch (e) { return -1; } }) >= 14);
 await page.screenshot({ path: join(out, 'log-filled.png'), fullPage: true });
+
+// ---- Protein never drops once the program has data: lowering Setup weight keeps the frozen week-1 protein
+await page.click('#tab-setup');
+await page.waitForTimeout(100);
+const protBefore = await page.locator('#status-strip').textContent();
+await page.fill('#s-weight', '80');
+await page.press('#s-weight', 'Tab');
+await page.waitForTimeout(150);
+const protAfter = await page.locator('#status-strip').textContent();
+const pOf = (t) => (t.match(/P (\d+)/) || [])[1];
+check('protein target unchanged after lowering Setup weight', pOf(protBefore) === pOf(protAfter), pOf(protBefore) + ' vs ' + pOf(protAfter));
+await page.fill('#s-weight', '85');
+await page.press('#s-weight', 'Tab');
 
 // ---- Check-in
 await tab('checkin');

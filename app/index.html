@@ -252,12 +252,14 @@
   .how summary { color: var(--accent); font-size: var(--fs-xs); }
   .how ul { margin-top: 4px; max-height: 40vh; overflow-y: auto; }
   @media (max-width: 560px) {
+    .top { position: static; }
     .timeline .t { grid-template-columns: 1fr; gap: 2px; }
     .status-strip { gap: 4px 10px; }
     .tabs { flex-wrap: wrap; }
     .tab { padding: 6px 9px 7px; }
     .hide-sm { display: none; }
     span.show-sm, td .sub.show-sm { display: block; }
+    td.n span.show-sm { display: inline; }
     th, td { padding: 6px 6px; }
     .btn.ghost { padding-inline: 4px; }
     .log-table th, .log-table td { padding: 5px 4px; font-size: var(--fs-xs); }

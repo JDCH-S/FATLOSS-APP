@@ -147,19 +147,27 @@
 
   // Once the program has started, week 1's targets are frozen (the engine then never lowers protein and later
   // Setup edits no longer rewrite past weeks). A new program start takes a new snapshot.
+  // Week 1 is frozen only once the program holds real data (a day logged on or after the start, or a check-in):
+  // until then Setup is still being filled in, even for a program start set in the past.
+  function hasProgramData() {
+    const ps = state.setup.programStart;
+    return Object.keys(state.logs || {}).some(function (d) { return d >= ps; }) ||
+      Object.keys(state.checkins || {}).some(function (w) { return w >= ps; });
+  }
   function ensureProgramSnapshot() {
     const today = todayIso();
     const ps = state.setup.programStart;
     const snap = state.program && state.program.snapshot;
+    if (!hasProgramData()) {
+      if (snap && snap.programStart === ps) { state.program = Object.assign({}, state.program, { snapshot: null }); S.save('program', state); }
+      return;
+    }
     if (today < ps) {
       if (snap) { state.program = Object.assign({}, state.program, { snapshot: null }); S.save('program', state); }
       return;
     }
-    // Older versions froze week 1 on the start day itself (possibly from example values): retake those.
-    const premature = snap && !snap.reason && snap.takenOn && snap.takenOn < E.addDays(ps, 7);
-    if (snap && snap.programStart === ps && !premature) return;
+    if (snap && snap.programStart === ps) return;
     const next = E.makeProgramSnapshot(state, today);
-    if (!next && premature) { state.program = Object.assign({}, state.program, { snapshot: null }); S.save('program', state); return; }
     if (!next) return;
     state.program = Object.assign({}, state.program || {}, { snapshot: next });
     S.save('program', state);
@@ -265,6 +273,10 @@
 
   function render() {
     if (!state) return;
+    // A summary tapped just before this render has toggled its <details> already; keep what the user sees.
+    doc.querySelectorAll('details[id]').forEach(function (d) {
+      if (d.id === 'prod-details') ui.prodOpen = d.open; else ui.open[d.id] = d.open;
+    });
     const view = doc.getElementById('view');
     const ae = doc.activeElement;
     const fid = ae && ae.id;
@@ -273,7 +285,7 @@
       const c = ctx();
       if (ui.logDraft && ui.logDraft.followToday && ui.logDraft.date !== c.today && !draftDirty()) resetDraft(c.today);
       renderHeader(c);
-      html = (ui.loadError ? '<div class="banner ' + ui.loadError.kind + '" role="alert">' + esc(ui.loadError.text) + '</div>' : '') +
+      html = slot('load-msgs', ui.loadError ? '<div class="banner ' + ui.loadError.kind + '" role="alert">' + esc(ui.loadError.text) + '</div>' : '') +
         (tab === 'setup' ? renderSetup(c)
         : tab === 'log' ? renderLog(c)
           : tab === 'checkin' ? renderCheckin(c)
@@ -341,9 +353,13 @@
   }
 
   // ---------- small builders ----------
-  function block(title, body, aside) {
-    return '<section class="block"><div class="block-head"><h2>' + esc(title) + '</h2>' + (aside || '') + '</div>' + body + '</section>';
+  // Every top-level block and message area carries a stable id so the in-place patch never pairs a block with
+  // its neighbour when a banner above it appears or goes away.
+  function slug(t) { return String(t).toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, ''); }
+  function block(title, body, aside, key) {
+    return '<section class="block" id="blk-' + (key || slug(title)) + '"><div class="block-head"><h2>' + esc(title) + '</h2>' + (aside || '') + '</div>' + body + '</section>';
   }
+  function slot(id, html) { return '<div id="' + id + '" class="stack">' + (html || '') + '</div>'; }
   function numInput(id, label, value, bind, step) {
     return '<label class="field" for="' + id + '">' + esc(label) +
       '<input type="number" id="' + id + '" data-bind="' + bind + '" inputmode="decimal" step="' + (step || 'any') + '" value="' +
@@ -378,11 +394,9 @@
   function renderSetup(c) {
     const s = state.setup;
     const h = [];
-    if (s.isExample) {
-      h.push('<div class="banner info">These are example inputs, not yours yet. Replace them with your own numbers; every target in the app updates when you leave a field.</div>');
-    }
-    if (ui.setupErr) h.push('<div class="banner bad" role="alert">' + esc(ui.setupErr) + '</div>');
-    if (ui.setupNote) h.push('<div class="banner info" role="status">' + esc(ui.setupNote) + '</div>');
+    h.push(slot('setup-msgs', (s.isExample ? '<div class="banner info">These are example inputs, not yours yet. Replace them with your own numbers; every target in the app updates when you leave a field.</div>' : '') +
+      (ui.setupErr ? '<div class="banner bad" role="alert">' + esc(ui.setupErr) + '</div>' : '') +
+      (ui.setupNote ? '<div class="banner info" role="status">' + esc(ui.setupNote) + '</div>' : '')));
 
     h.push(block('Body', '<div class="panel stack"><div class="grid">' +
       numInput('s-weight', 'Weight (kg)', s.weightKg, 'weightKg', 0.1) +
@@ -547,6 +561,7 @@
           (f.unit ? ' · 1 ' + esc(f.unit.name) + ' = ' + fmt(f.unit.grams) + ' g' : '') + '</span>' +
           '<span class="sub show-sm">' + fmt(f.kcal) + ' kcal · P ' + fmt(f.protein, 1) + ' · C ' + fmt(f.carbs, 1) + ' · F ' + fmt(f.fat, 1) + ' · fibre ' + fmt(f.fibre, 1) + '</span>' + del +
           confirmBar('deleteCustom', f.id, 'Delete this custom food? It is removed from your liked foods and replaced in the meal plan.', 'Delete') +
+          (ui.rowErr && ui.rowErr.id === f.id ? '<div class="banner bad" role="alert">' + esc(ui.rowErr.text) + '</div>' : '') +
           '</td><td class="n hide-sm">' + fmt(f.kcal) + '</td><td class="n hide-sm">' + fmt(f.protein, 1) + '</td><td class="n hide-sm">' + fmt(f.carbs, 1) +
           '</td><td class="n hide-sm">' + fmt(f.fat, 1) + '</td><td class="n hide-sm">' + fmt(f.fibre, 1) + '</td><td>' + tri + '</td></tr>';
       }).join('');
@@ -588,11 +603,11 @@
 
   function renderBackup() {
     const body = '<div class="panel stack"><p class="note">Download everything (setup, logs, check-ins, plan, product table) as one JSON file, or restore from one.</p>' +
-      msg(ui.backupMsg) +
+      slot('backup-msgs', msg(ui.backupMsg)) +
       confirmBar('importBackup', '', 'Replace all current data with the backup' + (ui.pendingBackup && ui.pendingBackup.name ? ' “' + ui.pendingBackup.name + '”' : '') + '?', 'Replace') +
       '<div class="row"><button type="button" class="btn" id="backup-export" data-action="backup-export">Export all data</button>' +
       '<button type="button" class="btn" id="backup-import" data-action="pick-file" data-target="file-backup">Import backup…</button></div>' +
-      exportBox('backup') + '</div>';
+      slot('backup-export', exportBox('backup')) + '</div>';
     return block('Backup', body);
   }
 
@@ -637,7 +652,7 @@
       tcard += '<details id="log-how"' + (ui.open['log-how'] ? ' open' : '') + '><summary class="small">Where these targets come from</summary><ul class="note">' +
         T.explanation.map(function (l) { return '<li>' + esc(l) + '</li>'; }).join('') + '</ul></details>';
     }
-    h.push('<div class="panel stack">' + tcard + '</div>');
+    h.push('<div class="panel stack" id="log-targets">' + tcard + '</div>');
 
     // weeks table
     const weeks = [];
@@ -689,21 +704,31 @@
       if (el) el.value = ui.logDraft[k] == null ? '' : ui.logDraft[k];
     });
   }
+  // Numbers already typed move with the date (they are meant for the day being picked); untouched fields show
+  // that day's stored values.
   function applyLogDate(value) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(value || '') || (ui.logDraft && ui.logDraft.date === value)) return;
+    const typed = {};
+    if (ui.logDraft) LOG_KEYS.forEach(function (k) { if (draftValue(k) !== ui.logDraft.orig[k]) typed[k] = ui.logDraft[k]; });
     resetDraft(value);
+    Object.keys(typed).forEach(function (k) { ui.logDraft[k] = typed[k]; });
     showDraftValues();
-    ui.logMsg = null;
+    ui.logMsg = Object.keys(typed).length ? { kind: 'info', text: 'The numbers you typed are now for ' + E.formatDate(value) + '. Save to keep them.' } : null;
     scheduleRender();
   }
 
   function saturdayBudget(c, date, T) {
     const p = planForWeek(c, E.weekStartOf(date));
     if (!p) return '<p class="note">Saturday breakfast and lunch are off-plan. Generate a meal plan to see how much of today’s target is left for them.</p>';
-    const tot = M.planTotals(p.plan, c.foods);
+    // Only what you will actually eat after lunch: foods left off the grocery list do not count.
     let kcal = 0, prot = 0;
     p.plan.meals.forEach(function (m) {
-      if (m.key !== 'breakfast' && m.key !== 'lunch') { kcal += tot.meals[m.key].kcal; prot += tot.meals[m.key].protein; }
+      if (m.key === 'breakfast' || m.key === 'lunch') return;
+      m.items.forEach(function (it) {
+        const f = c.foods[it.foodId];
+        if (!f || c.liked.indexOf(it.foodId) < 0) return;
+        kcal += f.kcal * it.grams / 100; prot += f.protein * it.grams / 100;
+      });
     });
     return '<div class="banner info">Saturday: breakfast and lunch are off-plan. Planned meals after lunch: <b>' + fmt(kcal) + ' kcal</b>, ' + fmt(prot) +
       ' g protein. Budget for your off-plan breakfast + lunch: <b>' + fmt(T.kcal - kcal) + ' kcal</b> and at least <b>' + fmt(Math.max(0, T.protein - prot)) + ' g protein</b>.</div>';
@@ -730,7 +755,7 @@
         (smActions ? '<span class="sub show-sm">' + smActions + '</span>' : '') +
         '</td><td class="n">' + (e && isNum(e.weight) ? fmt(e.weight, 1) : '') + '</td><td class="n muted hide-sm">' +
         (e && isNum(e.weight) && tr && tr.count >= 3 ? fmt(tr.avg, 1) : '') + '</td><td class="n ' + kcalCls + '">' + (e && isNum(e.kcal) ? fmt(e.kcal) : '') +
-        '</td><td class="n ' + protCls + '">' + (e && isNum(e.protein) ? fmt(e.protein) : '') + '</td><td class="n">' + (e && isNum(e.steps) ? fmt(e.steps) : '') +
+        '</td><td class="n ' + protCls + '">' + (e && isNum(e.protein) ? fmt(e.protein) : '') + '</td><td class="n">' + (e && isNum(e.steps) ? '<span class="hide-sm">' + fmt(e.steps) + '</span><span class="show-sm">' + fmt(e.steps / 1000, 1) + 'k</span>' : '') +
         '</td><td class="n hide-sm">' + actions + '</td></tr>';
       const conf = ui.confirm && ui.confirm.kind === 'deleteLog' && ui.confirm.key === d
         ? '<tr><td colspan="7">' + confirmBar('deleteLog', d, 'Delete the entry for ' + E.formatDate(d) + '?', 'Delete') + '</td></tr>' : '';
@@ -749,10 +774,10 @@
     const date = dateEl && dateEl.value;
     if (!date || !/^\d{4}-\d{2}-\d{2}$/.test(date)) { ui.logMsg = { kind: 'bad', text: 'Pick a date first.' }; return scheduleRender(); }
     if (ui.logDraft && date !== ui.logDraft.date) {
-      // A new date typed and confirmed with Enter: show that day instead of saving the other day's numbers onto it.
+      // A new date typed and confirmed with Enter or Save: typed numbers are for that day; with nothing typed, show it.
+      const dirty = draftDirty();
       applyLogDate(date);
-      ui.logMsg = { kind: 'info', text: 'Showing ' + E.formatDate(date) + '. Enter the numbers and save.' };
-      return scheduleRender();
+      if (!dirty) { ui.logMsg = { kind: 'info', text: 'Showing ' + E.formatDate(date) + '. Enter the numbers and save.' }; return scheduleRender(); }
     }
     const typed = { weight: read('log-weight'), kcal: read('log-kcal'), protein: read('log-protein'), steps: read('log-steps') };
     // Fields the user left as they were keep the latest stored value (another tab or device may have filled them).
@@ -819,7 +844,7 @@
     } else {
       banner = '<div class="banner">Next check-in: <b>' + esc(E.formatDate(sum.nextCheckinDate)) + '</b>, morning, after the weigh-in.</div>';
     }
-    h.push(banner);
+    h.push(slot('ci-msgs', banner));
     const baseline = week < ps;
 
     // week picker
@@ -1034,9 +1059,9 @@
     const weekSeg = '<div class="seg" role="group">' +
       '<button type="button" id="plan-week-this" data-action="plan-week" data-value="this" aria-pressed="' + String(ui.planWeek !== 'next') + '">This week · ' + esc(E.formatRange(c.weekNow)) + '</button>' +
       '<button type="button" id="plan-week-next" data-action="plan-week" data-value="next" aria-pressed="' + String(ui.planWeek === 'next') + '">Next week · from ' + esc(E.formatDate(E.addDays(c.weekNow, 7))) + ' dinner</button></div>';
-    h.push('<div class="row">' + weekSeg + '</div>');
+    h.push('<div class="row" id="plan-weekrow">' + weekSeg + '</div>');
     if (ui.planWeek === 'next' && T.source !== 'checkin' && !(state.checkins || {})[c.weekNow] && E.programWeekIndex(state.setup.programStart, week) > 0) {
-      h.push('<div class="banner">Provisional: next week’s targets are set by Friday’s check-in. Amounts will update when you save it.</div>');
+      h.push(slot('plan-prov', '<div class="banner">Provisional: next week’s targets are set by Friday’s check-in. Amounts will update when you save it.</div>'));
     }
 
     if (!state.plan || !state.plan.base) {
@@ -1073,8 +1098,8 @@
       '<span class="muted small">Generated for ' + esc(E.formatRange(state.plan.weekGenerated || week)) + '. Weekly target changes only rescale grams (carbs first, then fat).</span></div>' +
       confirmBar('regen', '', 'Replace the current meals, including your swaps, with a newly generated plan?', 'Regenerate');
 
-    h.push(block('Day totals · ' + E.formatRange(week), disallowedBanner(c) + (warnings.length ? '<div class="banner warn"><ul class="note" style="margin:0;padding-left:18px">' +
-      warnings.map(function (w) { return '<li>' + esc(w) + '</li>'; }).join('') + '</ul></div>' : '') + summ + actions + msg(ui.planMsg)));
+    h.push(block('Day totals · ' + E.formatRange(week), slot('plan-msgs', disallowedBanner(c) + (warnings.length ? '<div class="banner warn"><ul class="note" style="margin:0;padding-left:18px">' +
+      warnings.map(function (w) { return '<li>' + esc(w) + '</li>'; }).join('') + '</ul></div>' : '')) + summ + actions + slot('plan-msg', msg(ui.planMsg)), '', 'day-totals'));
 
     // meals
     const meals = plan.meals.map(function (m) {
@@ -1111,7 +1136,7 @@
   function unique(a) { return a.filter(function (x, i) { return a.indexOf(x) === i; }); }
   function okChip(ok, text) { return '<span class="chip ' + (ok ? 'good' : 'bad') + '">' + (ok ? '✓ ' : '✗ ') + esc(text) + '</span>'; }
   function sumRow(label, target, actual, unit, ok, text, dec) {
-    return '<tr><td>' + esc(label) + '</td><td class="n">' + fmt(target) + unit + '</td><td class="n">' + fmt(actual, dec || 0) + unit + '</td><td class="n">' + signed(actual - target, dec || 0) + unit +
+    return '<tr><td>' + esc(label) + '</td><td class="n">' + fmt(target, dec || 0) + unit + '</td><td class="n">' + fmt(actual, dec || 0) + unit + '</td><td class="n">' + signed(actual - target, dec || 0) + unit +
       '</td><td>' + (ok == null ? '' : okChip(ok, text)) + '</td></tr>';
   }
   function planDiff(c, a, b, ta, tb, estimated) {
@@ -1159,13 +1184,13 @@
     const weekSeg = '<div class="seg" role="group">' +
       '<button type="button" id="groc-week-coming" data-action="groc-week" data-value="coming" aria-pressed="' + String(ui.grocWeek !== 'previous') + '">Coming diet week · ' + esc(E.formatDate(coming)) + '</button>' +
       '<button type="button" id="groc-week-previous" data-action="groc-week" data-value="previous" aria-pressed="' + String(ui.grocWeek === 'previous') + '">Current diet week · ' + esc(E.formatDate(E.addDays(coming, -7))) + '</button></div>';
-    h.push('<div class="row">' + weekSeg + '</div>');
+    h.push('<div class="row" id="groc-weekrow">' + weekSeg + '</div>');
 
     const imp = state.priceMeta || {};
     const priceLine = '<span class="muted small">Prices last imported: <b>' + (imp.lastImport ? esc(dateLong(imp.lastImport)) + (imp.lastImportFile ? ' (' + esc(imp.lastImportFile) + ')' : '') : 'never') + '</b></span>';
     const tools = '<div class="row"><button type="button" class="btn" id="groc-export" data-action="groc-export">Export grocery list</button>' +
       '<button type="button" class="btn" id="groc-import" data-action="pick-file" data-target="file-prices">Import prices…</button>' +
-      priceLine + '</div>' + exportBox('groceries') + msg(ui.importMsg) + importErrors() + unmatchedPanel(c);
+      priceLine + '</div>' + slot('groc-msgs', exportBox('groceries') + msg(ui.importMsg) + importErrors() + unmatchedPanel(c));
 
     if (!state.plan || !state.plan.base) {
       h.push(block('Groceries', '<div class="panel stack"><p class="note">Generate a meal plan first; the grocery list is built from it.</p>' + tools + '</div>'));
@@ -1230,7 +1255,7 @@
       '</tbody><tfoot><tr><td colspan="' + (showStore ? 9 : 8) + '">Total' + (ui.grocView === 'cheapest' ? ' (best store per item)' : ' at ' + esc(ui.grocView)) + '</td><td class="n">' + eur(total) +
       '</td><td colspan="2"></td></tr></tfoot></table></div>';
 
-    h.push(block('Groceries', disallowedBanner(c) + intro + tools + totals + missingTxt));
+    h.push(block('Groceries', slot('groc-banned', disallowedBanner(c)) + intro + tools + totals + missingTxt));
     h.push(block('Shopping list', '<div class="row">' + viewSeg + '</div>' + table +
       '<p class="note">Prices marked “run price script” are older than 7 days, have no date, or are seeded estimates. Export the list, run <span class="mono">fetch_prices.py</span>, then import its output.</p>'));
     h.push(renderProductTable(c));
@@ -1300,7 +1325,7 @@
       '</div><div class="row"><button type="button" class="btn primary" id="np-add" data-action="prod-add">Add row</button><span class="muted small">The price date is set to today.</span></div></div></details>';
     const body2 = '<details class="panel" id="prod-details"' + (ui.prodOpen ? ' open' : '') + '><summary><b>Edit product table</b> <span class="muted small">(' + (state.products || []).length + ' rows · Colruyt, Delhaize, Carrefour)</span></summary>' +
       '<div class="stack" style="margin-top:12px"><p class="note">Every row is editable. Changing a price sets its date to today. Pack sizes are in grams (eggs: count × 55 g, liquids: 1 ml = 1 g, oil 0.92 g/ml).</p>' +
-      msg(ui.prodMsg) + '<div class="row">' + storeSeg + '<button type="button" class="btn ghost danger" id="prod-reset" data-action="prod-reset">Reset table to built-in products</button></div>' +
+      slot('prod-msgs', msg(ui.prodMsg)) + '<div class="row">' + storeSeg + '<button type="button" class="btn ghost danger" id="prod-reset" data-action="prod-reset">Reset table to built-in products</button></div>' +
       confirmBar('resetProducts', '', 'Replace the whole product table with the built-in rows? Imported and edited prices are lost.', 'Reset') + addForm +
       '<div class="tscroll"><table><thead><tr><th>Store</th><th>Food</th><th>Product</th><th>EAN</th><th>Pack g</th><th>Price €</th><th>Promo</th><th>Price date</th><th>Source</th><th></th></tr></thead><tbody>' +
       (body || '<tr><td colspan="10" class="muted">No rows.</td></tr>') + '</tbody></table></div></div></details>';
@@ -1312,6 +1337,7 @@
   // =====================================================================================
   const ACTIONS = {
     'set': function (el) {
+      ui.setupNote = null; ui.setupErr = null; ui.rowErr = null;
       const f = el.dataset.field;
       let v = el.dataset.value;
       if (f === 'mealsPerDay') v = Number(v);
@@ -1322,8 +1348,12 @@
         const kept = Object.assign({}, state.plan.byMeals || {});
         kept[state.plan.base.mealsPerDay] = state.plan.base;
         let base = kept[v];
-        const usable = base && base.meals.every(function (m) { return m.items.every(function (it) { return c.liked.indexOf(it.foodId) >= 0; }); });
-        if (usable) {
+        if (base) {
+          const fixed = M.replaceDisallowed(base, c.foods, c.liked, c.excluded);
+          base = fixed.impossible.length ? null : fixed.plan;
+        }
+        ui.planMsg = null;
+        if (base) {
           base = M.rescalePlan(base, c.foods, macros(T), stretchOpts(T)).plan;
           ui.setupNote = 'Meals per day is now ' + v + ': your earlier ' + v + '-meal plan is back, including its swaps.';
         } else {
@@ -1338,6 +1368,7 @@
       commit('setup');
     },
     'toggle-day': function (el) {
+      ui.setupNote = null; ui.setupErr = null; ui.rowErr = null;
       const f = el.dataset.field, d = Number(el.dataset.day);
       const arr = (state.setup[f] || []).slice();
       const i = arr.indexOf(d);
@@ -1347,6 +1378,7 @@
       commit('setup');
     },
     'food-pref': function (el) {
+      ui.setupNote = null; ui.setupErr = null; ui.rowErr = null;
       const id = el.dataset.food, v = el.dataset.v;
       const s = state.setup;
       s.likedFoods = (s.likedFoods || []).filter(function (x) { return x !== id; });
@@ -1357,7 +1389,7 @@
       commit('setup');
     },
     'add-custom': addCustomFood,
-    'delete-custom': function (el) { ui.confirm = { kind: 'deleteCustom', key: el.dataset.food }; scheduleRender(); },
+    'delete-custom': function (el) { ui.rowErr = null; ui.confirm = { kind: 'deleteCustom', key: el.dataset.food }; scheduleRender(); },
     'log-edit': function (el) {
       resetDraft(el.dataset.date); ui.logMsg = null; scheduleRender();
       setTimeout(function () { const w = doc.getElementById('log-weight'); if (w) { w.focus(); try { w.scrollIntoView({ block: 'center' }); } catch (e) { /* old browsers */ } } }, 20);
@@ -1442,17 +1474,19 @@
       else if (cf.kind === 'deleteProduct') { state.products = state.products.filter(function (r) { return r.id !== cf.key; }); commit('products'); }
       else if (cf.kind === 'deleteCustom') {
         const s = state.setup;
-        const likedBefore = (s.likedFoods || []).slice(), excludedBefore = (s.excludedFoods || []).slice();
-        s.likedFoods = likedBefore.filter(function (x) { return x !== cf.key; });
-        s.excludedFoods = excludedBefore.filter(function (x) { return x !== cf.key; });
-        // Replace it in the plan while its macros are still known, then drop it.
-        const note = cleanPlan() || '';
-        if (state.plan && state.plan.base && JSON.stringify(state.plan.base).indexOf('"' + cf.key + '"') >= 0) {
-          s.likedFoods = likedBefore; s.excludedFoods = excludedBefore;
-          ui.setupErr = 'This custom food cannot be deleted yet: nothing you like can replace it in the meal plan. Like another food of the same kind, or regenerate the plan, then delete it.';
-          return scheduleRender();
+        // Dry run first: if nothing liked can replace it in the plan, refuse without touching anything.
+        const c0 = ctx();
+        if (state.plan && state.plan.base) {
+          const trial = M.replaceDisallowed(state.plan.base, c0.foods, c0.liked.filter(function (x) { return x !== cf.key; }), c0.excluded);
+          if (trial.impossible.length) {
+            ui.rowErr = { id: cf.key, text: 'Not deleted: nothing you like can replace this food in the meal plan. Like another food of the same kind, or regenerate the plan, then delete it.' };
+            return scheduleRender();
+          }
         }
-        ui.setupNote = note || null;
+        s.likedFoods = (s.likedFoods || []).filter(function (x) { return x !== cf.key; });
+        s.excludedFoods = (s.excludedFoods || []).filter(function (x) { return x !== cf.key; });
+        // Replace it in the plan while its macros are still known, then drop it.
+        ui.setupNote = cleanPlan() || null;
         s.customFoods = (s.customFoods || []).filter(function (f) { return f.id !== cf.key; });
         commit('setup');
       } else if (cf.kind === 'importBackup' && ui.pendingBackup) {
@@ -1540,7 +1574,8 @@
     const next = M.swapFood(p.plan, c.foods, c.liked, c.excluded, el.dataset.meal, Number(el.dataset.idx), newId);
     state.plan = Object.assign({}, state.plan, { base: next, weekGenerated: week });
     recordPlanWeek(c);
-    ui.planMsg = { kind: 'good', text: 'Swapped in ' + c.foods[newId].name + '. Only that meal was re-solved.' };
+    ui.planMsg = { kind: 'good', text: 'Swapped in ' + c.foods[newId].name + '. Only that meal was re-solved' +
+      (ui.planWeek === 'next' ? ' on this week’s plan; next week’s amounts are rescaled from it.' : '.') };
     commit('plan');
   }
 
@@ -1678,9 +1713,9 @@
     const t = e.target;
     if (t.dataset.bind) return bindSetup(t);
     // Typing a date fires change per segment; dates apply when the field is really left, or on Enter.
-    if (t.id === 's-start' || t.id === 'log-date') return;
+    if (t.type === 'date') return;
     if (t.id === 'ci-week') { ui.checkinWeek = t.value; ui.checkinMsg = null; return scheduleRender(); }
-    if (t.dataset.swap) return doSwap(t);
+    if (t.dataset.swap) { if (ui.swapKbd !== t.id) doSwap(t); return; }
     if (t.dataset.prod) return editProduct(t);
     if (t.id === 'file-prices') return importPricesFile(t);
     if (t.id === 'file-backup') return importBackupFile(t);
@@ -1695,21 +1730,28 @@
     if (t.dataset.custom) { ui.custom[t.dataset.custom] = t.value; return; }
     if (t.dataset.newprod) { ui.newProd[t.dataset.newprod] = t.value; }
   }
+  function applyDate(t) {
+    if (t.id === 's-start') applyProgramStart(t);
+    else if (t.id === 'log-date') applyLogDate(t.value);
+    else if (t.dataset.prod && (t.value || '') !== (((state.products || []).find(function (r) { return r.id === t.dataset.prod; }) || {}).date || '')) editProduct(t);
+  }
   function onFocusOut(e) {
     const t = e.target;
-    if (t.id !== 's-start' && t.id !== 'log-date') return;
+    if (t.dataset && t.dataset.swap && ui.swapKbd === t.id) { ui.swapKbd = null; if (t.value) doSwap(t); return; }
+    if (t.type !== 'date') return;
     // Moving between the segments of the same date field is not leaving it.
-    setTimeout(function () {
-      if (doc.activeElement === t) return;
-      if (t.id === 's-start') applyProgramStart(t);
-      else applyLogDate(t.value);
-    }, 0);
+    setTimeout(function () { if (doc.activeElement !== t) applyDate(t); }, 0);
   }
   function onKeydown(e) {
     const t = e.target;
+    // Keyboard changes in a Swap list apply on Enter (or when leaving it), not on every arrow press.
+    if (t.dataset && t.dataset.swap) {
+      if (e.key === 'Enter') { e.preventDefault(); ui.swapKbd = null; if (t.value) doSwap(t); } else if (e.key !== 'Tab') ui.swapKbd = t.id;
+      return;
+    }
     if (e.key !== 'Enter') return;
-    // Enter in the start date applies it; Enter in the log date saves the day like the other log fields.
-    if (t.id === 's-start') { e.preventDefault(); applyProgramStart(t); }
+    // Enter in the start or a price date applies it; Enter in the log date saves the day like the other log fields.
+    if (t.id === 's-start' || (t.type === 'date' && t.dataset.prod)) { e.preventDefault(); applyDate(t); }
   }
   function applyProgramStart(input) {
     if (input.value !== state.setup.programStart) setProgramStart(input.value);
@@ -1768,7 +1810,12 @@
       const t = todayIso();
       if (t === lastDay) return;
       lastDay = t;
-      if (ui.logDraft && ui.logDraft.followToday && !draftDirty()) resetDraft(t);
+      if (ui.logDraft && ui.logDraft.followToday && !draftDirty()) {
+        resetDraft(t);
+        showDraftValues();
+        const dEl = doc.getElementById('log-date');
+        if (dEl) dEl.value = t;
+      }
       ensureProgramSnapshot();
       scheduleRender();
     }, 30000);

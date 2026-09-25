@@ -363,7 +363,9 @@ class ReviewFindingTests(unittest.TestCase):
         # Within 10 % of the row's own size counts as drained (a relabelled 100 g can for the 95 g row), beyond it not.
         c = fp.normalize_item({"name": "BONI tonijn 100 g", "price": 1.49}, drained_ratio=0.7)
         self.assertEqual((c["pack_size_g"], c["label_g"]), (70.0, 100.0))
-        self.assertEqual(fp.pack_for_row(c, {"pack_size_g": 95}), 100.0)
+        # Only the very same product (EAN / product-code match) keeps its label size; a name match stays converted.
+        self.assertEqual(fp.pack_for_row(c, {"pack_size_g": 95}, same_product=True), 100.0)
+        self.assertEqual(fp.pack_for_row(c, {"pack_size_g": 95}), 70.0)
         self.assertEqual(fp.pack_for_row(c, {"pack_size_g": 90}), 70.0)
         self.assertEqual(fp.pack_for_row(c, {"pack_size_g": None}), 70.0)
         self.assertEqual(fp.pack_for_row(c, None), 70.0)
@@ -458,6 +460,28 @@ class NetworkFailureTests(unittest.TestCase):
             with self.assertRaises(fp.ApifyError) as ctx:
                 fp.run_actor("a/b", {}, "tok", timeout_s=0, log=lambda *a: None)
         self.assertIn("ds9", str(ctx.exception))
+
+
+class DrainedUndoTests(unittest.TestCase):
+    def test_name_match_keeps_the_converted_drained_size(self):
+        c = {"ean": "", "product": "Carrefour Kikkererwten 250 g", "price_eur": 0.69, "pack_size_g": 150.0, "label_g": 250.0, "url": ""}
+        row = {"ean": "", "product": "Kikkererwten", "pack_size_g": 240}
+        self.assertEqual(fp.pack_for_row(c, row), 150.0)   # a different listing: 250 g net is ~150 g drained
+
+    def test_identical_name_counts_as_the_same_product(self):
+        export = {"items": [{"food_id": "tuna_water", "food": "Tuna", "food_nl": "Tonijn", "weekly_g": 400, "unit_g": None,
+                             "drained_ratio": 0.7, "g_per_ml": None,
+                             "stores": {"Colruyt": [{"ean": "", "product": "BONI tonijn in eigen nat MSC 95g", "pack_size_g": 95, "url": ""}],
+                                        "Delhaize": [], "Carrefour": []}}]}
+        raw = [{"searchTerm": "BONI tonijn in eigen nat MSC", "name": "BONI tonijn in eigen nat MSC 95g", "price": 1.39}]
+        rows, _ = fp.match_store(export, "Colruyt", raw, "2026-09-25")
+        self.assertEqual(rows[0]["pack_size_g"], 95.0)
+
+    def test_same_product_label_equal_to_table_drained_size(self):
+        c = {"ean": "5400141232974", "product": "BONI tonijn 95g", "price_eur": 1.39, "pack_size_g": 66.5, "label_g": 95.0}
+        row = {"ean": "5400141232974", "product": "BONI tonijn in eigen nat MSC 95g", "pack_size_g": 95}
+        self.assertEqual(fp.pack_for_row(c, row, same_product=True), 95.0)
+        self.assertEqual(fp.pack_for_row(c, row), 66.5)
 
 
 if __name__ == "__main__":

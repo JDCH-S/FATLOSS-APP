@@ -316,13 +316,14 @@ def normalize_item(raw, unit_g=None, drained_ratio=None, g_per_ml=None):
     return out
 
 
-def pack_for_row(c, row):
-    """A candidate's pack size for one product-table row. A drained-ratio conversion is undone when the label size
-    is within DRAINED_MATCH of the row's own pack size, which the table already holds in drained grams (Colruyt's
-    'BONI tonijn ... 95g' is listed and stored as 95 g drained)."""
+def pack_for_row(c, row, same_product=False):
+    """A candidate's pack size for one product-table row. For the very same product (matched by EAN or store
+    product code) a drained-ratio conversion is undone when the label size is within DRAINED_MATCH of the row's own
+    pack size, which the table already holds in drained grams (Colruyt's 'BONI tonijn ... 95g' is listed and stored
+    as 95 g drained). A name match is a different listing, so its converted size stands."""
     label = c.get("label_g")
     want = (row or {}).get("pack_size_g")
-    if label and isinstance(want, (int, float)) and want > 0 and abs(label - want) <= DRAINED_MATCH * want:
+    if same_product and label and isinstance(want, (int, float)) and want > 0 and abs(label - want) <= DRAINED_MATCH * want:
         return label
     return c.get("pack_size_g")
 
@@ -376,7 +377,7 @@ def best_match(row, candidates, min_score=0.55):
         if ean and c["ean"] and ean_key(c["ean"]) != ean:
             continue  # a different barcode is a different product
         s = name_score(row.get("product", ""), c["product"])
-        want, have = row.get("pack_size_g"), pack_for_row(c, row)
+        want, have = row.get("pack_size_g"), c.get("pack_size_g")
         if want and have:
             ratio = min(want, have) / max(want, have)
             s += 0.15 if ratio > 0.95 else (-0.15 if ratio < 0.6 else 0.0)
@@ -456,7 +457,8 @@ def match_store(export, store, raw_items, today, discover=0):
         if key in seen:
             continue
         seen.add(key)
-        c = dict(c, pack_size_g=pack_for_row(c, p["row"]))
+        same = how in ("ean", "product code") or normalize(p["row"].get("product")) == normalize(c["product"])
+        c = dict(c, pack_size_g=pack_for_row(c, p["row"], same))
         line = price_row(store, c, p["row"], today)
         if line["pack_size_g"] is None:
             report.append(f"  ! {food}: '{c['product']}' has no pack size in the store listing or your product table")

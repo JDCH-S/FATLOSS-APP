@@ -179,6 +179,35 @@ function makeLocalStorage(opts) {
   };
 }
 
+// One browser's localStorage seen from several tabs: each tab gets its own view, and a write from one view is
+// delivered to the other tabs' windows as a 'storage' event (a later task, as in browsers). hold() queues the events
+// (a tab that has not heard of another tab's writes yet) until the returned function is called.
+function makeSharedStorage() {
+  const m = new Map(), views = [];
+  let queue = null;
+  function deliver(ev, from) {
+    views.forEach(function (v) { if (v !== from && v.win) v.win.dispatch('storage', ev); });
+  }
+  return {
+    map: m,
+    hold: function () { queue = []; return function () { const q = queue; queue = null; q.forEach(function (x) { deliver(x.ev, x.from); }); }; },
+    view: function () {
+      const v = {
+        win: null,
+        getItem: function (k) { return m.has(k) ? m.get(k) : null; },
+        setItem: function (k, val) {
+          const old = m.has(k) ? m.get(k) : null;
+          m.set(k, String(val));
+          const ev = { type: 'storage', key: k, oldValue: old, newValue: String(val) };
+          if (queue) queue.push({ ev: ev, from: v }); else setImmediate(function () { deliver(ev, v); });
+        }
+      };
+      views.push(v);
+      return v;
+    }
+  };
+}
+
 function makeWindow(clock, db, ls) {
   const handlers = {};
   const doc = { visibilityState: 'visible', handlers: {}, addEventListener: function (t, f) { (doc.handlers[t] = doc.handlers[t] || []).push(f); } };
@@ -189,6 +218,7 @@ function makeWindow(clock, db, ls) {
     addEventListener: function (t, f) { (handlers[t] = handlers[t] || []).push(f); },
     document: doc,
     fire: function (t) { (handlers[t] || []).forEach(function (f) { f({ type: t }); }); },
+    dispatch: function (t, ev) { (handlers[t] || []).forEach(function (f) { f(ev); }); },
     hide: function () { doc.visibilityState = 'hidden'; (doc.handlers.visibilitychange || []).forEach(function (f) { f(); }); }
   };
 }
@@ -199,6 +229,7 @@ function openTab(env, name, opts) {
   const db = opts.noDb ? null : env.server.client(name, opts);
   const clock = opts.clock || env.clock;
   const win = makeWindow(clock, db, opts.ls || env.ls);
+  if (win.localStorage && 'win' in win.localStorage) win.localStorage.win = win;
   delete require.cache[require.resolve(STORE_PATH)];
   global.window = win;
   let S;
@@ -463,22 +494,96 @@ test('a transient read error at load is retried and the cloud data is used', asy
   assert.deepEqual(Object.keys(res.state.logs), ['2026-09-24']);
 });
 
-test('reads that keep failing give a read-only session that never writes over the cloud', async function () {
+test('reads that keep failing give a device-only session: never writes the cloud, keeps changes in this browser, says so', async function () {
   const env = newEnv();
   env.server.put('fl/setup', cloudSetup());
   env.server.fail('query', /^logs$/, 'unavailable');
   const a = openTab(env, 'a');
   const res = await load(env, a);
   assert.equal(res.readOnly, true);
-  assert.match(res.error, /Could not load your saved data/);
+  assert.equal(res.mode, 'device-only');
+  assert.equal(res.backend, 'cloud');
+  assert.equal(a.S.mode(), 'device-only');
+  assert.match(res.error, /^Could not load your saved data \(unavailable\)\. Changes are saved on this device only and sync after a successful reload\.$/);
   a.state.logs['2026-09-25'] = entry(90);
   a.S.save('logs', a.state);
   a.S.save('setup', a.state);
   await env.clock.advance(5000);
-  assert.equal(await a.S.flush(), false);
-  assert.match(lastStatus(a), /^error: Could not load/);
+  assert.equal(await a.S.flush(), false, 'not stored in the account');
+  assert.equal(lastStatus(a), 'error: Saved on this device only: your account could not be reached. It syncs after a successful reload.');
+  assert.ok(a.statuses.every(function (st) { return /^error: Saved on this device only/.test(st); }), a.statuses.join(' | '));
   assert.deepEqual(env.server.writes(), []);
   assert.equal(env.server.get('fl/setup').weightKg, 92);
+  assert.deepEqual(Object.keys(JSON.parse(env.ls.getItem('fatloss-app-v1')).logs), ['2026-09-25']);
+  assert.deepEqual(JSON.parse(env.ls.getItem('fatloss-app-v1-pending')).logs['2026-09-25'], { v: entry(90), b: null });
+});
+
+test('device-only changes reach the cloud on the next load that reads it; the cloud\'s newer values win', async function () {
+  const env = newEnv();
+  env.server.put('fl/setup', cloudSetup());
+  env.server.put('logs/2026', { days: { '2026-09-23': entry(91.4), '2026-09-24': entry(91.2) } });
+  const first = openTab(env, 'first');
+  await load(env, first);   // a healthy visit leaves this browser's copy in step with the cloud
+
+  env.server.fail('*', /.*/, 'unavailable');
+  const ro = openTab(env, 'ro');
+  const res = await load(env, ro);
+  assert.equal(res.mode, 'device-only');
+  assert.deepEqual(Object.keys(res.state.logs).sort(), ['2026-09-23', '2026-09-24'], 'the browser copy is shown');
+  ro.state.logs['2026-09-25'] = entry(91.1);                       // new day
+  ro.state.logs['2026-09-24'] = entry(91);                         // edited here, and on another device meanwhile
+  ro.S.save('logs', ro.state);
+  ro.state.checkins['2026-09-19'] = { weekStart: '2026-09-19', next: { kcal: 2300 } };
+  ro.S.save('checkins', ro.state);
+  ro.state.setup = Object.assign({}, ro.state.setup, { steps: 10500 });
+  ro.S.save('setup', ro.state);
+  await env.clock.advance(5000);
+  assert.deepEqual(env.server.writes(), []);
+  env.server.clearFaults();
+  env.server.put('logs/2026', { days: Object.assign(days(env.server), { '2026-09-24': entry(90.9) }) });
+
+  const next = openTab(env, 'next');
+  const res2 = await load(env, next);
+  assert.equal(res2.mode, 'cloud');
+  assert.deepEqual(Object.keys(res2.state.logs).sort(), ['2026-09-23', '2026-09-24', '2026-09-25']);
+  assert.equal(res2.state.logs['2026-09-25'].weight, 91.1);
+  assert.equal(res2.state.logs['2026-09-24'].weight, 90.9, 'the other device\'s newer value wins');
+  assert.deepEqual(Object.keys(res2.state.checkins), ['2026-09-19']);
+  assert.equal(res2.state.setup.steps, 10500);
+  await env.clock.advance(700);
+  assert.equal(days(env.server)['2026-09-25'].weight, 91.1);
+  assert.equal(days(env.server)['2026-09-24'].weight, 90.9);
+  assert.deepEqual(liveKeys(env.server.get('checkins/2026').records), ['2026-09-19']);
+  assert.equal(env.server.get('fl/setup').steps, 10500);
+  assert.equal(lastStatus(next), 'saved');
+});
+
+test('device-only mode reports when localStorage rejects the change too', async function () {
+  const env = newEnv();
+  env.server.put('fl/setup', cloudSetup());
+  env.server.fail('query', /^fl$/, 'unavailable');
+  const ls = makeLocalStorage();
+  const a = openTab(env, 'a', { ls: ls });
+  assert.equal((await load(env, a)).mode, 'device-only');
+  ls.setItem = function () { throw new Error('QuotaExceededError'); };
+  a.state.logs['2026-09-25'] = entry(90);
+  a.S.save('logs', a.state);
+  assert.equal(lastStatus(a), 'error: Not saved: your account could not be reached, and this browser\'s storage is full or blocked.');
+});
+
+test('mode() names the backend: cloud, browser, memory', async function () {
+  const env = newEnv();
+  env.server.put('fl/setup', cloudSetup());
+  const c = openTab(env, 'c');
+  assert.equal(c.S.mode(), 'memory', 'before load');
+  assert.equal((await load(env, c)).mode, 'cloud');
+  assert.equal(c.S.mode(), 'cloud');
+  const b = openTab(env, 'b', { noDb: true, ls: makeLocalStorage() });
+  assert.equal((await load(env, b)).mode, 'browser');
+  assert.equal(b.S.mode(), 'browser');
+  const m = openTab(env, 'm', { noDb: true, ls: makeLocalStorage({ throwSet: true }) });
+  assert.equal((await load(env, m)).mode, 'memory');
+  assert.equal(m.S.backend(), 'memory');
 });
 
 test('edits made while the db was unavailable reach the cloud on the next load, unless the cloud changed them since', async function () {
@@ -644,6 +749,147 @@ test('a change the page could not send before it closed is written by the next l
   await load(env, c);
   await env.clock.advance(700);
   assert.equal(env.server.writes('c').length, 0, 'the journal is empty once the writes are confirmed');
+});
+
+// ---------- verification pass: two tabs sharing the browser copy (no db) ----------
+test('browser mode: another tab\'s saves reach an open tab through the storage event (onRemote per section)', async function () {
+  const env = newEnv();
+  const shared = makeSharedStorage();
+  const a = openTab(env, 'a', { noDb: true, ls: shared.view() });
+  const b = openTab(env, 'b', { noDb: true, ls: shared.view() });
+  await load(env, a); await load(env, b);
+  assert.equal(a.res.mode, 'browser');
+
+  b.state.logs['2026-09-24'] = entry(85.1);
+  b.S.save('logs', b.state);
+  await settle();
+  assert.deepEqual(Object.keys(a.state.logs), ['2026-09-24']);
+  assert.deepEqual(a.remotes.map(function (r) { return r.section; }), ['logs']);
+  assert.equal(a.remotes[0].value, a.state.logs);
+  assert.deepEqual(b.remotes, [], 'a tab is not told about its own write');
+
+  b.state.setup = Object.assign({}, b.state.setup, { steps: 11000 });
+  b.S.save('setup', b.state);
+  b.state.checkins['2026-09-19'] = { weekStart: '2026-09-19', next: { kcal: 2300 } };
+  b.S.save('checkins', b.state);
+  await settle();
+  assert.equal(a.state.setup.steps, 11000);
+  assert.deepEqual(Object.keys(a.state.checkins), ['2026-09-19']);
+  assert.deepEqual(a.remotes.map(function (r) { return r.section; }), ['logs', 'setup', 'checkins']);
+
+  // A deletion travels the same way; an event that changes nothing for this tab is not reported.
+  delete b.state.logs['2026-09-24'];
+  b.S.save('logs', b.state);
+  await settle();
+  assert.deepEqual(a.state.logs, {});
+  const n = a.remotes.length;
+  b.S.save('plan', b.state);
+  await settle();
+  assert.equal(a.remotes.length, n);
+
+  // a's own days survive b's saves, and a reload in either tab shows both tabs' work.
+  a.state.logs['2026-09-25'] = entry(84.7);
+  a.S.save('logs', a.state);
+  await settle();
+  assert.deepEqual(Object.keys(b.state.logs), ['2026-09-25']);
+  const c = openTab(env, 'c', { noDb: true, ls: shared.view() });
+  await load(env, c);
+  assert.deepEqual(Object.keys(c.state.logs), ['2026-09-25']);
+  assert.equal(c.state.setup.steps, 11000);
+  assert.deepEqual(Object.keys(c.state.checkins), ['2026-09-19']);
+});
+
+test('browser mode: a tab that has not heard of another tab\'s saves never drops or reverts them when it saves', async function () {
+  const env = newEnv();
+  const shared = makeSharedStorage();
+  const a = openTab(env, 'a', { noDb: true, ls: shared.view() });
+  const b = openTab(env, 'b', { noDb: true, ls: shared.view() });
+  await load(env, a); await load(env, b);
+  a.state.logs['2026-09-20'] = entry(86);
+  a.state.logs['2026-09-21'] = entry(85.9);
+  a.S.save('logs', a.state);
+  await settle();
+  assert.deepEqual(Object.keys(b.state.logs).sort(), ['2026-09-20', '2026-09-21']);
+
+  const release = shared.hold();   // a hears nothing of b's saves until release()
+  b.state.logs['2026-09-24'] = entry(85.1);                  // new in b
+  b.state.logs['2026-09-20'] = entry(85.8);                  // edited in b
+  delete b.state.logs['2026-09-21'];                         // deleted in b
+  b.S.save('logs', b.state);
+  b.state.checkins['2026-09-12'] = { weekStart: '2026-09-12', next: { kcal: 2400 } };
+  b.S.save('checkins', b.state);
+  b.state.setup = Object.assign({}, b.state.setup, { age: 36 });
+  b.S.save('setup', b.state);
+  await settle();
+  assert.deepEqual(Object.keys(a.state.logs).sort(), ['2026-09-20', '2026-09-21'], 'a is behind');
+
+  a.state.logs['2026-09-25'] = entry(84.7);
+  a.S.save('logs', a.state);
+  a.state.checkins['2026-09-19'] = { weekStart: '2026-09-19', next: { kcal: 2300 } };
+  a.S.save('checkins', a.state);
+  a.state.setup.steps = 9500;
+  a.S.save('setup', a.state);
+  const stored = JSON.parse(shared.map.get('fatloss-app-v1'));
+  assert.deepEqual(Object.keys(stored.logs).sort(), ['2026-09-20', '2026-09-24', '2026-09-25']);
+  assert.equal(stored.logs['2026-09-20'].weight, 85.8, 'b\'s edit is not reverted');
+  assert.deepEqual(Object.keys(stored.checkins).sort(), ['2026-09-12', '2026-09-19']);
+  // Setup is one section: a's whole Setup is the newest save, as with a cloud document.
+  assert.equal(stored.setup.steps, 9500);
+  // a's state now holds what it merged, and the page is told.
+  assert.deepEqual(Object.keys(a.state.logs).sort(), ['2026-09-20', '2026-09-24', '2026-09-25']);
+  assert.equal(a.state.logs['2026-09-20'].weight, 85.8);
+  assert.deepEqual(Object.keys(a.state.checkins).sort(), ['2026-09-12', '2026-09-19']);
+  await settle();
+  assert.deepEqual(a.remotes.map(function (r) { return r.section; }).sort(), ['checkins', 'logs']);
+
+  // The late events change nothing more in a; b gets a's saves.
+  release();
+  await settle();
+  assert.deepEqual(Object.keys(a.state.logs).sort(), ['2026-09-20', '2026-09-24', '2026-09-25']);
+  assert.equal(a.state.setup.steps, 9500);
+  assert.equal(a.remotes.length, 2);
+  assert.equal(lastStatus(a), 'saved');
+  assert.deepEqual(Object.keys(b.state.logs).sort(), ['2026-09-20', '2026-09-24', '2026-09-25']);
+  assert.deepEqual(Object.keys(b.state.checkins).sort(), ['2026-09-12', '2026-09-19']);
+  assert.equal(b.state.setup.steps, 9500);
+
+  // A tab saving a section other than logs keeps the other tab's logs in the stored copy.
+  const release2 = shared.hold();
+  b.state.logs['2026-09-26'] = entry(84.5);
+  b.S.save('logs', b.state);
+  a.state.plan = { base: 'x' };
+  a.S.save('plan', a.state);
+  release2();
+  await settle();
+  assert.deepEqual(Object.keys(JSON.parse(shared.map.get('fatloss-app-v1')).logs).sort(), ['2026-09-20', '2026-09-24', '2026-09-25', '2026-09-26']);
+  assert.deepEqual(b.state.plan, { base: 'x' });
+  assert.ok(a.state.logs['2026-09-26']);
+});
+
+test('device-only tabs share the browser copy the same way, and the journal keeps both tabs\' changes', async function () {
+  const env = newEnv();
+  env.server.put('fl/setup', cloudSetup());
+  env.server.fail('*', /.*/, 'unavailable');
+  const shared = makeSharedStorage();
+  const a = openTab(env, 'a', { ls: shared.view() });
+  const b = openTab(env, 'b', { ls: shared.view() });
+  await load(env, a); await load(env, b);
+  assert.equal(a.S.mode(), 'device-only');
+  const release = shared.hold();
+  b.state.logs['2026-09-24'] = entry(85.1);
+  b.S.save('logs', b.state);
+  a.state.logs['2026-09-25'] = entry(84.7);
+  a.S.save('logs', a.state);
+  release();
+  await settle();
+  assert.deepEqual(Object.keys(a.state.logs).sort(), ['2026-09-24', '2026-09-25']);
+  assert.deepEqual(Object.keys(b.state.logs).sort(), ['2026-09-24', '2026-09-25']);
+  assert.deepEqual(Object.keys(JSON.parse(shared.map.get('fatloss-app-v1-pending')).logs).sort(), ['2026-09-24', '2026-09-25']);
+  env.server.clearFaults();
+  const next = openTab(env, 'next', { ls: shared.view() });
+  await load(env, next);
+  await env.clock.advance(700);
+  assert.deepEqual(liveKeys(days(env.server)), ['2026-09-24', '2026-09-25']);
 });
 
 // ---------- finding 40: save status ----------

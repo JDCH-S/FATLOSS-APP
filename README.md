@@ -74,7 +74,7 @@ compares with the plan you actually had last week, swaps included.
 
 Weekly quantity per food = grams per meal × how often that meal falls in the window: every meal after lunch
 7 times; breakfast and lunch 6 times when Saturday breakfast and lunch are off-plan, 7 when included.
-For each store the app picks the cheapest pack option, rounds packs up and shows the leftover; the cheapest mix
+For each store the app picks the cheapest pack option with a current price (an estimate only when nothing current exists), rounds packs up and shows the leftover; the cheapest mix
 takes the best store per item. Any price without a date, seeded as an estimate, or older than 7 days is flagged
 **run price script**.
 
@@ -115,8 +115,11 @@ python3 price_script/fetch_prices.py grocery-list-2026-10-03.json -o prices-2026
   cannot be imported, so it is skipped and reported.
 - Pack sizes follow the food database: canned tuna, chickpeas and kidney beans in **drained** grams (the label's
   net weight × the food's drained ratio: 0.7 for tuna, 0.6 for legumes), olive oil at 0.92 g/ml. The grocery-list
-  export carries these factors (`drained_ratio`, `g_per_ml`). Write drained grams for canned foods in hand-made
-  import files too.
+  export carries these factors (`drained_ratio`, `g_per_ml`). The ratio is not applied when the listing already
+  gives the drained weight ("uitgelekt", "égoutté", "drained", or a drained-weight field; a size written next to
+  those words is used), or when the listed size is within 10 % of your product row's own pack size, which the table
+  keeps in drained grams (Colruyt's "BONI tonijn in eigen nat MSC 95g" stays 95 g). Write drained grams for canned
+  foods in hand-made import files too.
 - Network trouble (timeouts, dropped connections, a response that is not JSON, HTTP 429/5xx) is retried once
   while polling and downloading; starting a run is never retried, so nothing is billed twice. A store that still
   fails is reported and the other stores' rows are still written (exit code 1, or 2 when no rows were written).
@@ -146,9 +149,11 @@ Inside claude.ai your data is stored in the artifact's database under your accou
 by you (the artifact's owner). It survives reloads, sessions and new versions of the app. Several open tabs or
 devices stay in sync: daily entries and check-ins are saved one by one, so an old tab never overwrites newer
 entries, and changes made elsewhere appear without reloading. If the saved data can't be read when the app opens,
-it says so and saves nothing until a reload succeeds. Opened outside
-claude.ai, the app falls back to this browser's local storage. Setup → Backup exports or restores everything
-as one JSON file.
+it says so and keeps your changes on this device only (in this browser's local storage, never written over your
+account's data); the next time the app opens and can read your account, it adds them there, except for any day,
+check-in or setting that was changed elsewhere in the meantime (the newer value wins). Opened outside claude.ai,
+the app falls back to this browser's local storage; several tabs of it stay in sync too, and a tab left open
+never drops days or check-ins another tab saved. Setup → Backup exports or restores everything as one JSON file.
 
 ## Development
 

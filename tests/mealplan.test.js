@@ -669,32 +669,94 @@ test('rescalePlan: once carbs reach their minimum, fat items take the rest of a 
   assert.ok(r.plan.warnings.some(function (w) { return /^(Calories|Protein) /.test(w); }), 'unreachable target is reported');
 });
 
-test('rescalePlan: an increase the carb items cannot hold stretches them (≤ 1.25 × maximum) before fat takes the rest', function () {
+function overMax(plan) {
+  const out = [];
+  plan.meals.forEach(function (m) {
+    m.items.forEach(function (it) { if (it.grams > F[it.foodId].maxPerMeal + 1e-9) out.push(m.key + ' ' + it.foodId + ' ' + it.grams); });
+  });
+  return out;
+}
+
+test('rescalePlan: an increase the carbs cannot hold goes to fat up to +20 %; only a large one (≥ 300 kcal) then stretches carbs', function () {
   const T = targetsFor(3000, 185);
   const base = gen({ targets: T, mealsPerDay: 3 });
   const stretchCap = function (id) { const f = F[id], s = f.unit ? f.unit.grams : 5; return Math.floor(1.25 * f.maxPerMeal / s + 1e-9) * s; };
   itemsByRole(base, 'carb').forEach(function (x) { assert.equal(x.it.grams, F[x.it.foodId].maxPerMeal, 'base carb ' + x.it.foodId + ' at max'); });
-  // +300 kcal: the carb items stretch and fat items stay (the day's fat is already ~10 % above target); before the
-  // fix oil and nuts took the energy (finding 14)
-  const T1 = Object.assign({}, T, { kcal: T.kcal + 300, carbs: T.carbs + 75 });
-  const r1 = M.rescalePlan(base, F, T1);
+  const up = function (dk, opts) { const T1 = Object.assign({}, T, { kcal: T.kcal + dk, carbs: T.carbs + dk / 4 }); return { T1: T1, r: M.rescalePlan(base, F, T1, opts) }; };
+  const fatItems = itemsByRole(base, 'fat');
+  // routine +200: fat items take it while the day's fat stays within +20 %; no portion passes its maximum (before
+  // the fix oats, potatoes and bread went to 1.25 × their maximum on any increase)
+  const a = up(200);
+  assert.deepEqual(overMax(a.r.plan), []);
+  assert.ok(fatItems.some(function (x) { return gramsAt(a.r.plan, x) > x.it.grams; }), 'fat items grew');
+  assert.ok(totals(a.r.plan, F).day.fat <= 1.2 * a.T1.fat + 1e-9, 'fat ' + totals(a.r.plan, F).day.fat);
+  assert.deepEqual(a.r.plan.warnings, []);
+  // +299 is still routine: fat goes past +20 % only as far as the kcal limit needs, and that is reported
+  const b = up(299);
+  assert.deepEqual(overMax(b.r.plan), []);
+  const cb = M.checkPlan(b.r.plan, F, b.T1);
+  assert.ok(Math.abs(cb.kcalDiffPct) <= 5, cb.issues.join(' | '));
+  assert.equal(b.r.plan.warnings.length, 1, b.r.plan.warnings.join(' | '));
+  assert.match(b.r.plan.warnings[0], /^Fat \d+ g is \d+ % above the \d+ g target \(limit \+20 %\)/);
+  // +300 (a phase change): fat first fills to +20 %, then the carb items stretch (≤ 1.25 ×, reported) instead of
+  // fat going past +20 %
+  const c = up(300);
   itemsByRole(base, 'carb').forEach(function (x) {
-    const g = gramsAt(r1.plan, x);
+    const g = gramsAt(c.r.plan, x);
     assert.ok(g >= x.it.grams && g <= stretchCap(x.it.foodId), x.it.foodId + ' ' + g);
   });
-  assert.ok(itemsByRole(base, 'carb').some(function (x) { return gramsAt(r1.plan, x) > F[x.it.foodId].maxPerMeal; }));
-  itemsByRole(base, 'fat').forEach(function (x) { assert.equal(gramsAt(r1.plan, x), x.it.grams, x.it.foodId); });
-  const c1 = M.checkPlan(r1.plan, F, T1);
-  assert.ok(Math.abs(c1.kcalDiffPct) <= 5 && Math.abs(c1.proteinDiffG) <= 10, c1.issues.join(' | '));
-  assert.ok(c1.issues.length > 0);
-  c1.issues.forEach(function (w) { assert.match(w, /is above the \d+ g per-meal maximum \(more meals per day would spread it\)\.$/); });
-  // +600 kcal: every carb item reaches its stretched maximum before the fat items grow
-  const T2 = Object.assign({}, T, { kcal: T.kcal + 600, carbs: T.carbs + 150 });
-  const r2 = M.rescalePlan(base, F, T2);
-  itemsByRole(base, 'carb').forEach(function (x) { assert.equal(gramsAt(r2.plan, x), stretchCap(x.it.foodId), x.it.foodId); });
-  const fats = itemsByRole(base, 'fat');
-  assert.ok(fats.every(function (x) { return gramsAt(r2.plan, x) >= x.it.grams; }));
-  assert.ok(fats.some(function (x) { return gramsAt(r2.plan, x) > x.it.grams; }), 'fat items took the rest');
+  assert.ok(overMax(c.r.plan).length > 0);
+  assert.ok(totals(c.r.plan, F).day.fat <= 1.2 * c.T1.fat + 1e-9, 'fat ' + totals(c.r.plan, F).day.fat);
+  const cc = M.checkPlan(c.r.plan, F, c.T1);
+  assert.ok(Math.abs(cc.kcalDiffPct) <= 5 && Math.abs(cc.proteinDiffG) <= 10, cc.issues.join(' | '));
+  c.r.plan.warnings.forEach(function (w) { assert.match(w, /is above the \d+ g per-meal maximum \(more meals per day would spread it\)\.$/); });
+  // …unless the caller forbids it (e.g. targets that drifted up over several check-ins)
+  assert.deepEqual(overMax(up(300, { allowCarbStretch: false }).r.plan), []);
+  assert.deepEqual(overMax(up(600, { allowCarbStretch: false }).r.plan), []);
+  // +600: every carb item reaches its stretched maximum, then fat items take what keeps kcal within the limit
+  const d = up(600);
+  itemsByRole(base, 'carb').forEach(function (x) { assert.equal(gramsAt(d.r.plan, x), stretchCap(x.it.foodId), x.it.foodId); });
+  assert.ok(fatItems.every(function (x) { return gramsAt(d.r.plan, x) >= x.it.grams; }));
+  assert.ok(fatItems.some(function (x) { return gramsAt(d.r.plan, x) > x.it.grams; }), 'fat items took the rest');
+  assert.ok(Math.abs(M.checkPlan(d.r.plan, F, d.T1).kcalDiffPct) <= 5);
+});
+
+test('rescalePlan: routine check-ins (±100 / ±200 kcal) never take a portion past its per-meal maximum (carb stretch finding)', function () {
+  // the reported case: 3 meals at 2500 kcal / 140 g protein (oats, potatoes and bread already at their maximum),
+  // then an ordinary +200 kcal check-in; before: oats 165 g and potatoes 765 g with two warnings
+  const T = { kcal: 2500, protein: 140, fat: 61.111111111111114, carbs: 347.5 };
+  const base = gen({ targets: T, mealsPerDay: 3 });
+  assert.deepEqual(base.warnings, []);
+  const T1 = Object.assign({}, T, { kcal: 2700, carbs: 397.5 });
+  const r = M.rescalePlan(base, F, T1);
+  assert.deepEqual(overMax(r.plan), []);
+  assert.deepEqual(r.plan.warnings, []);
+  assert.ok(r.changes.every(function (ch) { return F[ch.foodId].category === 'fat'; }), JSON.stringify(r.changes));
+  // property: default foods, 3–5 meals, a spread of targets
+  [3, 4, 5].forEach(function (n) {
+    [1900, 2400, 2900].forEach(function (kcal) {
+      [140, 190].forEach(function (protein) {
+        const Tb = targetsFor(kcal, protein);
+        const b = gen({ targets: Tb, mealsPerDay: n });
+        if (overMax(b).length) return;
+        [-200, -100, 100, 200].forEach(function (dk) {
+          const p = M.rescalePlan(b, F, Object.assign({}, Tb, { kcal: kcal + dk, carbs: Tb.carbs + dk / 4 })).plan;
+          assert.deepEqual(overMax(p), [], n + ' meals ' + kcal + '/' + protein + ' ' + dk);
+        });
+      });
+    });
+  });
+});
+
+test('checkPlan: calories short with every carb portion at its maximum says so (carb stretch finding)', function () {
+  const T = targetsFor(3000, 185);
+  const base = gen({ targets: T, mealsPerDay: 3 });
+  const issues = M.checkPlan(base, F, Object.assign({}, T, { kcal: 3600 })).issues.filter(function (w) { return /^Calories /.test(w); });
+  assert.equal(issues.length, 1);
+  assert.match(issues[0], /\(−\d+(\.\d)? %, limit ±5 %\): every carb portion is already as large as one meal allows; more meals per day \(or regenerating the plan\) would make room\.$/);
+  // not when a carb portion still has room, nor when calories are over
+  assert.match(M.checkPlan(BASE, F, Object.assign({}, T0, { kcal: T0.kcal * 1.2 })).issues.filter(function (w) { return /^Calories /.test(w); })[0], /limit ±5 %\)\.$/);
+  assert.match(M.checkPlan(base, F, Object.assign({}, T, { kcal: 2500 })).issues.filter(function (w) { return /^Calories /.test(w); })[0], /limit ±5 %\)\.$/);
 });
 
 test('rescalePlan: a 3-meal maintenance break goes to carbs, not oil and nuts, and stays on target (finding 14)', function () {
@@ -860,6 +922,49 @@ test('swapFood re-solves the meal to a valid day when the same foods allow it (f
   assert.deepEqual(p.warnings.map(function (w) { return w.slice(0, 11); }), ['Fat 81 g is']);
   assertPlanMeetsRules(Object.assign({}, p, { warnings: [] }), F, T, allowedSet(liked), 'chicken slices → eggs');
   p.meals.forEach(function (m, j) { if (j > 0) assert.deepStrictEqual(m, plan.meals[j]); });
+});
+
+test('swapFood: when no one- or two-item move reaches the limits, the meal is re-solved as a whole (finding 16)', function () {
+  // each case needed three portions of the swapped meal to move together; before, the repair (one or two items)
+  // gave up and the day kept a protein warning
+  const cases = [
+    { liked: ['chicken_slices', 'milk_semi', 'quinoa', 'potatoes', 'oats', 'bread_wholemeal', 'witloof', 'spinach', 'bell_pepper', 'kiwi', 'banana'],
+      T: { kcal: 2400, protein: 225, fat: 58.666666666666664, carbs: 243 }, meals: 5, meal: 'dinner', from: 'quinoa', to: 'bread_wholemeal',
+      // before: chicken slices 200 g, bread 35 g, bell pepper 395 g at protein −10.7 g (the fat floor warning is
+      // the base plan's: no fat food is liked)
+      warnings: [/^Fat \d+ g is well below/] },
+    { liked: ['turkey_breast', 'tofu', 'chicken_slices', 'milk_skim', 'greek_yogurt_0', 'kidney_beans', 'rice_brown', 'bread_wholemeal', 'broccoli',
+      'bell_pepper', 'mushrooms', 'mandarin', 'frozen_berries', 'almonds', 'gouda'],
+      T: { kcal: 2000, protein: 210, fat: 51, carbs: 175.25 }, meals: 4, meal: 'snack_pm', from: 'greek_yogurt_0', to: 'milk_skim',
+      warnings: [] },   // before: milk 500 g, bread 35 g, mandarin 210 g at protein −10.2 g
+    { liked: ['beef_steak', 'eggs', 'tofu', 'greek_yogurt_0', 'kidney_beans', 'lentils_red', 'bread_wholemeal', 'oats', 'green_beans', 'witloof',
+      'broccoli', 'pear', 'banana', 'chia', 'olive_oil'],
+      T: { kcal: 1900, protein: 165, fat: 51, carbs: 195.25 }, meals: 5, meal: 'lunch', from: 'beef_steak', to: 'eggs',
+      // before: 3 eggs, kidney beans 165 g, green beans 400 g at protein −13 g; valid: 5 eggs, beans ~50 g and fewer
+      // green beans (whole eggs take fat well above target, which is reported)
+      warnings: [/^Fat \d+ g is \d+ % above/] }
+  ];
+  cases.forEach(function (c) {
+    const plan = gen({ liked: c.liked, targets: c.T, mealsPerDay: c.meals });
+    const mi = plan.meals.findIndex(function (m) { return m.key === c.meal; });
+    const idx = plan.meals[mi].items.findIndex(function (it) { return it.foodId === c.from; });
+    const t = process.hrtime.bigint();
+    const p = M.swapFood(plan, F, c.liked, [], c.meal, idx, c.to);
+    const ms = Number(process.hrtime.bigint() - t) / 1e6;
+    const label = c.from + ' → ' + c.to;
+    assert.ok(ms < 100, label + ' took ' + ms.toFixed(1) + ' ms');
+    assert.equal(p.warnings.length, c.warnings.length, label + ': ' + p.warnings.join(' | '));
+    c.warnings.forEach(function (re, i) { assert.match(p.warnings[i], re, label); });
+    assertStructure(p, F, allowedSet(c.liked), label);
+    const d = totals(p, F).day;
+    assert.ok(Math.abs(d.kcal - c.T.kcal) <= 0.05 * c.T.kcal && Math.abs(d.protein - c.T.protein) <= 10 && d.fibre >= 25, label);
+    p.meals.forEach(function (m, j) { if (j !== mi) assert.deepStrictEqual(m, plan.meals[j]); });
+    // produce never goes below its portion before the swap
+    plan.meals[mi].items.forEach(function (it, k) {
+      if (it.role === 'produce') assert.ok(p.meals[mi].items[k].grams >= it.grams, label + ' ' + it.foodId);
+    });
+    assert.deepStrictEqual(M.swapFood(plan, F, c.liked, [], c.meal, idx, c.to), p, label + ' deterministic');
+  });
 });
 
 // ---------- replaceDisallowed ----------

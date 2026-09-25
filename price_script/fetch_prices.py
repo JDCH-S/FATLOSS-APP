@@ -11,7 +11,9 @@ that the app's "Import prices" button accepts:
 
 Rows for product-table entries without an EAN also carry "match_product" (your table's name for the row), while
 "product" is the store's current name. Pack sizes follow the food database: canned tuna and legumes in drained
-grams (label net weight x the food's drained ratio), oil at 0.92 g/ml.
+grams (label net weight x the food's drained ratio), oil at 0.92 g/ml. The ratio is skipped when the listing already
+gives the drained weight (uitgelekt / égoutté / drained, or a drained-weight field), or when the listed size is within
+10 % of your product row's own pack size, which the table keeps in drained grams.
 
 Usage
     export APIFY_TOKEN=apify_api_xxx            # Apify console > Settings > API & Integrations
@@ -98,6 +100,15 @@ PROMO_FIELDS = ("promo", "isPromo", "promotion", "promotions", "isPromotion", "h
 PACK_FIELDS = ("pack_size_g", "packSize", "size", "content", "contents", "netContent", "quantity", "weight",
                "packaging", "unit", "volume", "contentSize")
 URL_FIELDS = ("url", "productUrl", "link", "href", "product.url")
+# A size the listing gives as the drained weight is already on the food's basis (no drained-ratio conversion).
+DRAINED_FIELDS = ("drainedWeight", "drained_weight", "netDrainedWeight", "drainedNetWeight", "uitlekgewicht",
+                  "netto_uitgelekt_gewicht", "poidsEgoutte", "poids_egoutte")
+_DRAINED_WORD = r"\b(?:uitgelekt|uitlekgewicht|egoutt|drained)[a-z]*"   # on lowercased text without accents
+_SIZE_G = r"(?:(\d+)\s*[x×]\s*)?(\d+(?:[.,]\d+)?)\s*(kg|gr|g)\b"
+DRAINED_WORDS = re.compile(_DRAINED_WORD)
+# "netto uitgelekt gewicht 95 g", "poids égoutté : 112 g", "112 g uitgelekt", "3 x 52 g drained"
+DRAINED_SIZE = (re.compile(_DRAINED_WORD + r"[^0-9]{0,25}?" + _SIZE_G), re.compile(_SIZE_G + r"[^0-9]{0,12}?" + _DRAINED_WORD))
+DRAINED_MATCH = 0.10   # a label size within 10 % of the table row's (drained) pack size is taken as drained
 
 
 # ---------------------------------------------------------------------------------------------
@@ -230,9 +241,35 @@ def truthy_promo(item):
     return promo
 
 
+def drained_info(*texts):
+    """(stated, grams): whether a listing text says its weight is the drained weight (uitgelekt, égoutté, drained),
+    and the size written next to those words when there is one ('160 g (112 g uitgelekt)' gives 112)."""
+    stated = False
+    for t in texts:
+        if isinstance(t, (dict, list)):   # {"value": 95, "unit": "g uitgelekt"} reads as "95 g uitgelekt"
+            t = " ".join(str(v) for v in (t.values() if isinstance(t, dict) else t) if isinstance(v, (str, int, float)))
+        if not isinstance(t, str) or not t:
+            continue
+        plain = "".join(ch for ch in unicodedata.normalize("NFD", t) if unicodedata.category(ch) != "Mn").lower()
+        if not DRAINED_WORDS.search(plain):
+            continue
+        stated = True
+        for pat in DRAINED_SIZE:
+            m = pat.search(plain)
+            if m:
+                n, v, unit = m.group(1), float(m.group(2).replace(",", ".")), m.group(3)
+                g = (float(n) if n else 1.0) * v * (1000.0 if unit == "kg" else 1.0)
+                if g > 0:
+                    return True, g
+    return stated, None
+
+
 def normalize_item(raw, unit_g=None, drained_ratio=None, g_per_ml=None):
     """Map one scraped dataset item to {ean, product, pack_size_g, price_eur, promo, url}. pack_size_g is on the
-    food database's basis: a canned food's label (net) weight times its drained ratio, a liquid's ml times g_per_ml."""
+    food database's basis: a canned food's label (net) weight times its drained ratio, a liquid's ml times g_per_ml.
+    The ratio is not applied when the listing gives a drained weight (a drained-weight field, or a size or name that
+    says uitgelekt / égoutté / drained). When it is applied, "label_g" keeps the size before the conversion, so
+    pack_for_row() can undo it for a table row whose own (drained) pack size equals the label size."""
     name = first(raw, NAME_FIELDS)
     if isinstance(name, dict):
         name = first(name, ("nl", "fr", "en", "value"))
@@ -242,16 +279,31 @@ def normalize_item(raw, unit_g=None, drained_ratio=None, g_per_ml=None):
     product = str(name or "").strip()
     if brand and normalize(brand) and normalize(brand) not in normalize(product):
         product = f"{str(brand).strip()} {product}".strip()
-    pack = None
-    for f in PACK_FIELDS:
+    pack, pack_text, drained = None, None, False
+    for f in DRAINED_FIELDS:
         pack = parse_pack_size(get_path(raw, f), unit_g, g_per_ml)
         if pack:
+            drained = True
             break
     if not pack:
+        for f in PACK_FIELDS:
+            v = get_path(raw, f)
+            pack = parse_pack_size(v, unit_g, g_per_ml)
+            if pack:
+                pack_text = v
+                break
+    if not pack:
         pack = parse_pack_size(product, unit_g, g_per_ml)
-    if pack and drained_ratio:
+    if not drained:
+        stated, grams = drained_info(pack_text, product)
+        if stated:
+            drained = True
+            pack = grams or pack
+    label_g = None
+    if pack and drained_ratio and not drained:
+        label_g = round(pack, 1)
         pack *= drained_ratio
-    return {
+    out = {
         "ean": parse_ean(first(raw, EAN_FIELDS)),
         "product": product,
         "pack_size_g": round(pack, 1) if pack else None,
@@ -259,6 +311,20 @@ def normalize_item(raw, unit_g=None, drained_ratio=None, g_per_ml=None):
         "promo": truthy_promo(raw),
         "url": str(first(raw, URL_FIELDS) or ""),
     }
+    if label_g is not None:
+        out["label_g"] = label_g
+    return out
+
+
+def pack_for_row(c, row):
+    """A candidate's pack size for one product-table row. A drained-ratio conversion is undone when the label size
+    is within DRAINED_MATCH of the row's own pack size, which the table already holds in drained grams (Colruyt's
+    'BONI tonijn ... 95g' is listed and stored as 95 g drained)."""
+    label = c.get("label_g")
+    want = (row or {}).get("pack_size_g")
+    if label and isinstance(want, (int, float)) and want > 0 and abs(label - want) <= DRAINED_MATCH * want:
+        return label
+    return c.get("pack_size_g")
 
 
 # ---------------------------------------------------------------------------------------------
@@ -310,9 +376,9 @@ def best_match(row, candidates, min_score=0.55):
         if ean and c["ean"] and ean_key(c["ean"]) != ean:
             continue  # a different barcode is a different product
         s = name_score(row.get("product", ""), c["product"])
-        want = row.get("pack_size_g")
-        if want and c.get("pack_size_g"):
-            ratio = min(want, c["pack_size_g"]) / max(want, c["pack_size_g"])
+        want, have = row.get("pack_size_g"), pack_for_row(c, row)
+        if want and have:
+            ratio = min(want, have) / max(want, have)
             s += 0.15 if ratio > 0.95 else (-0.15 if ratio < 0.6 else 0.0)
         if s > best_s:
             best, best_s = c, s
@@ -390,6 +456,7 @@ def match_store(export, store, raw_items, today, discover=0):
         if key in seen:
             continue
         seen.add(key)
+        c = dict(c, pack_size_g=pack_for_row(c, p["row"]))
         line = price_row(store, c, p["row"], today)
         if line["pack_size_g"] is None:
             report.append(f"  ! {food}: '{c['product']}' has no pack size in the store listing or your product table")

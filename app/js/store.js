@@ -1,6 +1,10 @@
 /* Persistence. Primary backend: the claude.ai `db` capability (documents survive reloads, sessions and
  * republishes; other tabs and devices see changes live). Fallback: localStorage (only this browser).
  *
+ * mode(): 'cloud' (db), 'browser' (no db in this view: localStorage), 'memory' (no db and no localStorage), or
+ * 'device-only' (the db exists but could not be read at load: changes go to localStorage and the journal, never to
+ * the cloud, and the next load that reads the cloud writes them there).
+ *
  *   fl/setup         -> state.setup
  *   fl/program       -> state.program ({} while it is null)
  *   fl/plan          -> {plan}
@@ -15,6 +19,11 @@
  * (onRemote). Each save also goes synchronously to localStorage: the whole state (the fallback copy) and a journal of
  * the changes the cloud has not confirmed yet, which the next load writes when the cloud still holds the value the
  * change was made on (page closed before the write, or the cloud was unreachable).
+ *
+ * In browser and device-only modes the localStorage copy is shared by every tab: a save writes only its own section
+ * into the latest stored copy (log and check-in entries merged one by one, so a tab that is behind never drops or
+ * reverts another tab's entries), and the window 'storage' event merges other tabs' saves into this tab's state
+ * (onRemote), with the same rules as cloud snapshots.
  */
 (function (root) {
   'use strict';
@@ -35,10 +44,12 @@
   // The runtime cannot run db in this view: same as claude.use('db') resolving null.
   const NO_DB = { not_granted: 1, capability_disabled: 1, capability_removed: 1 };
   const LS_FAILED = 'Could not save in this browser (storage is full or blocked).';
+  const DEVICE_ONLY = 'Saved on this device only: your account could not be reached. It syncs after a successful reload.';
+  const DEVICE_ONLY_FAILED = 'Not saved: your account could not be reached, and this browser\'s storage is full or blocked.';
 
   let db = null;
   let backend = 'memory';
-  let readOnly = null;       // message when the cloud exists but could not be read: nothing is written this visit
+  let mode = 'memory';       // 'cloud' | 'browser' | 'memory' | 'device-only' (see the top of this file)
   let lsOk = true;
   let defs = null;           // defaults given to load(), to merge remote sections with
   let cur = null;            // the state last loaded or saved; remote changes are merged into it
@@ -48,6 +59,8 @@
   const docBase = {};        // fl/* section -> canonical JSON of the body the cloud holds
   const entryBase = { logs: {}, checkins: {} };   // entry section -> key -> canonical JSON the cloud holds
   const W = {};              // doc path -> {busy, failed, tries, timer}: one write in flight per document
+  // Browser and device-only modes: canonical JSON of what this tab last read from or wrote to the localStorage copy.
+  const seen = { doc: {}, logs: {}, checkins: {} };
 
   function emit(status, detail) {
     statusFns.forEach(function (fn) { try { fn(status, detail); } catch (e) { /* ignore listener errors */ } });
@@ -206,8 +219,9 @@
   }
 
   // ---------- load ----------
-  // Resolves {state, backend: 'cloud'|'browser'|'memory', error, readOnly, migrated}. When the cloud store exists
-  // but cannot be read, the session is read-only: it shows the browser copy (or the defaults) and writes nothing.
+  // Resolves {state, backend: 'cloud'|'browser'|'memory', mode, error, readOnly, migrated}. When the cloud store
+  // exists but cannot be read, the session is device-only (backend 'cloud', readOnly true): it shows the browser copy
+  // (or the defaults) and records changes in localStorage and the journal, never in the cloud.
   async function load(defaults) {
     defs = defaults;
     let ns = null;
@@ -226,21 +240,38 @@
       } catch (e) { error = e; }
       db = null;
       if (!NO_DB[error && error.code]) {
-        readOnly = 'Could not load your saved data (' + describe(error) + '). Nothing is saved until the page is reloaded.';
         backend = 'cloud';
+        mode = 'device-only';
         cur = merge(defaults, local);
-        return { state: cur, backend: backend, error: readOnly, readOnly: true, migrated: false };
+        openLocal();
+        return { state: cur, backend: backend, mode: mode, readOnly: true, migrated: false,
+          error: 'Could not load your saved data (' + describe(error) + '). Changes are saved on this device only and sync after a successful reload.' };
       }
     }
     cur = merge(defaults, local);
     lsOk = local !== null || lsSet(LS_KEY, cur);
-    backend = lsOk ? 'browser' : 'memory';
-    // The journal records what this session changes relative to what it loaded.
+    backend = mode = lsOk ? 'browser' : 'memory';
+    openLocal();
+    return { state: cur, backend: backend, mode: mode, error: error ? describe(error) : null, readOnly: false, migrated: false };
+  }
+
+  // Browser and device-only modes. The journal records what this session changes relative to what it loaded (the
+  // browser copy mirrors the cloud as the last session that read it saw it), so a later load that reads the cloud
+  // writes those changes where the cloud still holds the loaded value.
+  function openLocal() {
     Object.keys(DOCS).forEach(function (s) { docBase[s] = canon(bodyOf(s, cur)); });
     Object.keys(FIELD).forEach(function (s) {
       Object.keys(cur[s] || {}).forEach(function (k) { const c = canon(cur[s][k]); if (c !== undefined) entryBase[s][k] = c; });
     });
-    return { state: cur, backend: backend, error: error ? describe(error) : null, readOnly: false, migrated: false };
+    SECTIONS.forEach(remember);
+    if (typeof root.addEventListener !== 'function') return;
+    root.addEventListener('storage', function (e) { if (e && e.key === LS_KEY) pull(); });
+    // Storage events can be missed while a page sits in the back/forward cache.
+    root.addEventListener('pageshow', function () { pull(); });
+    const d = root.document;
+    if (d && typeof d.addEventListener === 'function') {
+      d.addEventListener('visibilitychange', function () { if (d.visibilityState === 'visible') pull(); });
+    }
   }
 
   async function read(fn) {
@@ -274,7 +305,7 @@
     const legacy = fl.checkins && isObj(fl.checkins.records) ? fl.checkins.records : null;
     if (legacy) Object.keys(legacy).forEach(function (k) { if (!stored['checkins' + k] && legacy[k]) loaded.checkins[k] = clone(legacy[k]); });
 
-    backend = 'cloud';
+    backend = mode = 'cloud';
     // First cloud run after using the browser fallback: move that data into the cloud store.
     const migrated = !fl.setup && !Object.keys(loaded.logs).length && local !== null;
     cur = merge(defs, migrated ? local : loaded);
@@ -289,7 +320,7 @@
         if (!changedItems('checkins').length) return db.doc(LEGACY_CHECKINS).delete();
       }).catch(function () { /* the next load migrates again */ });
     }
-    return { state: cur, backend: backend, error: null, readOnly: false, migrated: migrated };
+    return { state: cur, backend: backend, mode: mode, error: null, readOnly: false, migrated: migrated };
   }
 
   // ---------- other tabs and devices ----------
@@ -308,9 +339,12 @@
   // Echoes of this page's unconfirmed writes and not-yet-definitive views are skipped; a definitive one follows.
   function fresh(snap) { const m = snap.metadata || {}; return !m.hasPendingWrites && !m.fromCache; }
 
+  function notify(section) {
+    remoteFns.forEach(function (fn) { try { fn(section, cur[section]); } catch (e) { /* ignore listener errors */ } });
+  }
   function changed(section) {
     lsSet(LS_KEY, cur);
-    remoteFns.forEach(function (fn) { try { fn(section, cur[section]); } catch (e) { /* ignore listener errors */ } });
+    notify(section);
   }
 
   function applyDoc(section, snap) {
@@ -340,6 +374,75 @@
       n++;
     });
     if (n) { cur[section] = next; changed(section); }
+  }
+
+  // ---------- other tabs sharing the localStorage copy (browser and device-only modes) ----------
+  // Records what the stored copy now holds for a section, as this tab wrote or read it.
+  function remember(section) {
+    if (DOCS[section]) { seen.doc[section] = canon(bodyOf(section, cur)); return; }
+    const vals = cur[section] || {}, sn = seen[section] = {};
+    Object.keys(vals).forEach(function (k) { const c = canon(vals[k]); if (c !== undefined) sn[k] = c; });
+  }
+
+  // Another tab saved: take what it changed. Setup, program, plan, products and priceMeta are taken whole, as their
+  // snapshots are in cloud mode (saves here are synchronous, so this tab has nothing waiting to be written); log and
+  // check-in entries one by one, except an entry this tab changed and has not saved.
+  function pull() {
+    const stored = lsGet(LS_KEY);
+    if (!isObj(stored) || !defs) return;
+    const latest = merge(defs, stored), touched = [];
+    Object.keys(DOCS).forEach(function (s) {
+      const r = canon(bodyOf(s, latest));
+      if (r === seen.doc[s]) return;
+      seen.doc[s] = r;
+      if (r === canon(bodyOf(s, cur))) return;
+      cur[s] = latest[s];
+      touched.push(s);
+    });
+    Object.keys(FIELD).forEach(function (s) {
+      const remote = latest[s] || {}, sn = seen[s], mine = cur[s] || {}, next = Object.assign({}, mine);
+      let n = 0;
+      Object.keys(Object.assign({}, sn, remote)).forEach(function (k) {
+        const r = canon(remote[k]), m = canon(mine[k]), pending = m !== sn[k];
+        if (r === undefined) delete sn[k]; else sn[k] = r;
+        if (pending || m === r) return;
+        if (r === undefined) delete next[k]; else next[k] = clone(remote[k]);
+        n++;
+      });
+      if (n) { cur[s] = next; touched.push(s); }
+    });
+    touched.forEach(notify);
+  }
+
+  // Before a log or check-in save: entries this tab has not changed since it last synced take the stored copy's
+  // value (another tab may have added, edited or deleted them); entries it changed keep its own. Updates the
+  // section in place and says whether anything came from the stored copy.
+  function mergeStoredEntries(section, stored) {
+    const mine = cur[section] || (cur[section] = {}), sn = seen[section];
+    let n = 0;
+    Object.keys(Object.assign({}, sn, stored)).forEach(function (k) {
+      const m = canon(mine[k]);
+      if (m !== sn[k]) return;
+      const r = canon(stored[k]);
+      if (r === m) return;
+      if (r === undefined) delete mine[k]; else mine[k] = clone(stored[k]);
+      n++;
+    });
+    return n > 0;
+  }
+
+  // Writes one section into the latest stored copy (other sections keep what other tabs stored), records it in the
+  // journal, and returns whether localStorage took the write.
+  function saveLocal(section) {
+    const stored = lsGet(LS_KEY);
+    const latest = isObj(stored) && defs ? merge(defs, stored) : null;
+    const pulled = !!latest && !!FIELD[section] && mergeStoredEntries(section, latest[section] || {});
+    record(section);
+    let ok;
+    if (latest) { latest[section] = cur[section]; ok = lsSet(LS_KEY, latest); } else ok = lsSet(LS_KEY, cur);
+    if (ok) remember(section);
+    if (pulled) Promise.resolve().then(function () { notify(section); });
+    return ok;
   }
 
   // ---------- writes ----------
@@ -429,23 +532,29 @@
   }
 
   // Debounced per section. The localStorage copy and the journal are written at once, so a closed page loses nothing.
+  // Device-only mode stops there and reports 'error' (the change is not in the account yet).
   function save(section, state) {
     if (!DOCS[section] && !FIELD[section]) return;
-    if (readOnly) { emit('error', readOnly); return; }
     cur = state;
+    if (mode !== 'cloud') {
+      lsOk = saveLocal(section);
+      if (mode === 'device-only') emit('error', lsOk ? DEVICE_ONLY : DEVICE_ONLY_FAILED);
+      else if (lsOk) emit('saved'); else emit('error', LS_FAILED);
+      return;
+    }
     record(section);
     lsOk = lsSet(LS_KEY, state);
-    if (backend !== 'cloud') { if (lsOk) emit('saved'); else emit('error', LS_FAILED); return; }
     if (!failed()) emit('saving');
     if (timers[section]) root.clearTimeout(timers[section]);
     timers[section] = later(function () { flushSection(section); }, DEBOUNCE_MS);
     Object.keys(W).forEach(function (p) { if (W[p].failed) pump(p); });
   }
 
-  // Writes everything pending now; resolves true once all of it is stored.
+  // Writes everything pending now; resolves true once all of it is stored (in device-only mode: false, as it is
+  // only on this device).
   async function flush() {
-    if (readOnly) return false;
-    if (backend !== 'cloud') return lsOk;
+    if (mode === 'device-only') return false;
+    if (mode !== 'cloud') return lsOk;
     SECTIONS.forEach(function (s) { if (timers[s]) flushSection(s); });
     Object.keys(W).forEach(function (p) { if (W[p].failed) pump(p); });
     for (;;) {
@@ -577,7 +686,8 @@
   const api = {
     load: load, save: save, saveAll: saveAll, flush: flush, onStatus: onStatus, onRemote: onRemote,
     exportAll: exportAll, importAll: importAll, download: download, merge: merge,
-    backend: function () { return backend; }
+    backend: function () { return backend; },
+    mode: function () { return mode; }
   };
 
   if (typeof module === 'object' && module.exports) module.exports = api;

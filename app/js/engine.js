@@ -369,13 +369,18 @@
   // ======================================================================================
   // check-in history lookups
   // ======================================================================================
-  // The weekStart of the latest saved check-in before `beforeWeekStart` that passes `accept`, or null.
+  // A saved check-in counts only for a program week (weekStart ≥ programStart). Records for earlier weeks (saved by an old
+  // version, or left behind when the program start moved later) belong to the baseline and never feed the learned TDEE,
+  // the weight used, the stall chain, the goal test or any target.
+  function isProgramWeek(state, weekStart) { return weekStart >= state.setup.programStart; }
+
+  // The weekStart of the latest saved program-week check-in before `beforeWeekStart` that passes `accept`, or null.
   function latestCheckinWeek(state, beforeWeekStart, accept) {
     const checkins = state.checkins || {};
     let best = null;
     Object.keys(checkins).forEach(function (k) {
       const r = checkins[k];
-      if (r && k < beforeWeekStart && accept(r) && (best === null || k > best)) best = k;
+      if (r && isProgramWeek(state, k) && k < beforeWeekStart && accept(r) && (best === null || k > best)) best = k;
     });
     return best;
   }
@@ -434,7 +439,7 @@
     const checkins = state.checkins || {};
     let best = null;
     Object.keys(checkins).forEach(function (k) {
-      if (checkins[k] && checkins[k].goalReached) {
+      if (checkins[k] && checkins[k].goalReached && isProgramWeek(state, k)) {
         const w = addDays(k, 7);
         if (best === null || w < best) best = w;
       }
@@ -481,10 +486,45 @@
       part('fat', prev.fat, next.fat) + '.';
   }
 
+  // The rate of targets whose reason was not saved (records and snapshots from before reasons were saved): the live rule
+  // when it gives the same rate, else the saved rate and where it comes from.
+  function savedRateReason(setup, rate, weightKg, origin) {
+    const live = weeklyRate(setup, weightKg);
+    return live.value === rate ? live.reason : ratePct(rate) + ' %/week, ' + origin;
+  }
+
+  // How a week's calories follow from its TDEE, in the same words wherever those targets are explained (week 1, check-in
+  // notes, phase changes, carried weeks). Cut: the weight used and its source, the weekly rate and why, the target loss and
+  // the deficit formula. Maintenance (break, final): the TDEE used and why there is no deficit.
+  function basisLines(T) {
+    const type = T.phase && T.phase.type;
+    if (type === 'cut' && allNum(T.rate, T.weightUsed) && T.rate > 0) {
+      const kg = T.weightUsed;
+      return [
+        'Weight ' + fmt(kg, 2) + ' kg: ' + (T.weightSource || 'the weight these targets were set with') + '.',
+        (T.rateReason || ratePct(T.rate) + ' %/week') + '.',
+        'Target loss = ' + ratePct(T.rate) + ' % × ' + fmt(kg, 2) + ' kg = ' + fmt(T.rate * kg, 2) + ' kg/week.',
+        dailyDeficit(T.rate, kg).formula + '.'
+      ];
+    }
+    if ((type === 'break' || type === 'final') && isNum(T.tdeeBasis)) {
+      const tdee = T.tdeeText || tdeeText(T.tdeeSource === 'formula', T.tdeeBasis, 'saved with these targets');
+      return [T.phase.label + ' has no deficit (' + (type === 'break' ? 'the cut deficit is removed and added back as carbs'
+        : 'the goal is reached, so calories hold the weight') + '): the target is the TDEE, here ' + tdee + '. ' +
+        (T.tdeeSource === 'formula' ? 'Program weeks 1–' + FORMULA_WEEKS + ' use the formula TDEE; the learned one takes over from week ' +
+          (FORMULA_WEEKS + 1) + '.' : 'From program week ' + (FORMULA_WEEKS + 1) + ' the TDEE learned at the check-ins is used.')];
+    }
+    return [];
+  }
+  // `lines` plus the basis lines of T that it does not already hold.
+  function withBasisLines(lines, T) {
+    return lines.concat(basisLines(T).filter(function (l) { return lines.indexOf(l) < 0; }));
+  }
+
   function emptyTargets(weekStart, phase, source, text) {
     return { weekStart: weekStart, kcal: null, protein: null, fat: null, carbs: null, limited: false, phase: phase, source: source,
-      tdeeBasis: null, tdeeSource: 'formula', deficit: null, rate: null, weightUsed: null, targetLossKg: 0,
-      bmrFloorApplied: false, explanation: [text] };
+      tdeeBasis: null, tdeeSource: 'formula', tdeeText: null, deficit: null, rate: null, rateReason: null, weightUsed: null,
+      weightSource: null, targetLossKg: 0, bmrFloorApplied: false, explanation: [text] };
   }
 
   // Week 1, computed live from Setup.
@@ -502,21 +542,24 @@
     const raw = tdee.value - deficit;
     const bmrFloorApplied = raw < bmr.value;
     const m = initialMacros(Math.max(raw, bmr.value), protein.value, kg);
+    const T = {
+      weekStart: ps, kcal: m.kcal, protein: m.protein, fat: m.fat, carbs: m.carbs, limited: m.limited, phase: phase,
+      source: 'initial', tdeeBasis: tdee.value, tdeeSource: 'formula', tdeeText: tdeeText(true, tdee.value), deficit: deficit,
+      rate: cut ? rate.value : 0, rateReason: cut ? rate.reason : null, weightUsed: kg, weightSource: 'Setup weight',
+      targetLossKg: cut ? rate.value * kg : 0, bmrFloorApplied: bmrFloorApplied, explanation: null
+    };
     const explanation = ['Week 1 (' + phase.label + '): formula TDEE ' + fmt(tdee.value) + ' kcal − deficit ' + fmt(deficit) +
       ' kcal = ' + fmt(raw) + ' kcal.', tdee.formula + '.'];
     if (phase.type === 'final') explanation.push(finalReason(state, grw));
-    if (cut) explanation.push(rate.reason + '.', def.formula + '.');
+    Array.prototype.push.apply(explanation, basisLines(T));
     if (bmrFloorApplied) explanation.push('Raised to the BMR floor: ' + fmt(bmr.value) + ' kcal.');
     explanation.push(protein.formula + '.', macroText(m, kg));
-    return {
-      weekStart: ps, kcal: m.kcal, protein: m.protein, fat: m.fat, carbs: m.carbs, limited: m.limited, phase: phase,
-      source: 'initial', tdeeBasis: tdee.value, tdeeSource: 'formula', deficit: deficit, rate: cut ? rate.value : 0,
-      weightUsed: kg, targetLossKg: cut ? rate.value * kg : 0, bmrFloorApplied: bmrFloorApplied, explanation: explanation
-    };
+    T.explanation = explanation;
+    return T;
   }
 
-  // Week 1: the targets fixed by the program snapshot, so Setup edits after the start never rewrite them; live from
-  // Setup when there is no snapshot, or when a goal change has since moved week 1 into another phase.
+  // Week 1: the targets fixed by the program snapshot, so Setup edits after that never rewrite them; live from Setup when
+  // there is no snapshot, or when a goal change has since moved week 1 into another phase.
   function weekOneTargets(state, grw) {
     const snap = programSnapshot(state);
     if (!snap) return firstWeekTargets(state, grw);
@@ -525,18 +568,24 @@
     const w = snap.week1;
     if (w.phaseType !== phase.type) {
       const t = firstWeekTargets(state, grw);
-      t.explanation.unshift('The week-1 targets saved at the program start were for another phase; week 1 is now ' + phase.label +
+      t.explanation.unshift('The saved week-1 targets were for another phase; week 1 is now ' + phase.label +
         ', so they are recomputed from Setup.');
       return t;
     }
-    return {
+    const cut = phase.type === 'cut';
+    const T = {
       weekStart: ps, kcal: w.kcal, protein: w.protein, fat: w.fat, carbs: w.carbs, limited: !!w.limited, phase: phase,
-      source: 'initial', tdeeBasis: numOrNull(w.tdeeBasis), tdeeSource: w.tdeeSource || 'formula', deficit: numOrNull(w.deficit),
-      rate: numOrNull(w.rate), weightUsed: numOrNull(w.weightUsed), targetLossKg: isNum(w.targetLossKg) ? w.targetLossKg : 0,
-      bmrFloorApplied: !!w.bmrFloorApplied,
-      explanation: ['Week-1 targets saved when the program started; Setup edits after the start do not change them.']
-        .concat(w.explanation || [])
+      source: 'initial', tdeeBasis: numOrNull(w.tdeeBasis), tdeeSource: w.tdeeSource || 'formula',
+      tdeeText: w.tdeeText || (isNum(w.tdeeBasis) ? tdeeText(w.tdeeSource !== 'learned', w.tdeeBasis) : null),
+      deficit: numOrNull(w.deficit), rate: numOrNull(w.rate),
+      rateReason: w.rateReason || (cut && allNum(w.rate, w.weightUsed) && w.rate > 0
+        ? savedRateReason(state.setup, w.rate, w.weightUsed, 'saved with the week-1 targets') : null),
+      weightUsed: numOrNull(w.weightUsed), weightSource: w.weightSource || 'Setup weight when the week-1 targets were saved',
+      targetLossKg: isNum(w.targetLossKg) ? w.targetLossKg : 0, bmrFloorApplied: !!w.bmrFloorApplied, explanation: null
     };
+    T.explanation = withBasisLines(['Week-1 targets fixed' + (snap.takenOn ? ' on ' + formatDate(snap.takenOn) : '') + ', ' +
+      (snap.reason || 'when the program started') + '; Setup edits since then do not change them.'].concat(w.explanation || []), T);
+    return T;
   }
 
   // Protein is never reduced below the week-1 target fixed at the program start: the extra protein comes out of carbs,
@@ -558,14 +607,22 @@
     const n = record.next;
     const phase = phaseForWeek(state.setup.programStart, weekStart, grw);
     const cut = phase.type === 'cut';
-    return {
+    const from = 'the check-in of ' + formatRange(addDays(weekStart, -7));
+    const tdeeSource = n.tdeeSource || record.tdeeUsedForNext || 'learned';
+    // Records saved before the weight source, rate reason and TDEE text were stored get them rebuilt from their numbers.
+    const T = {
       weekStart: weekStart, kcal: n.kcal, protein: n.protein, fat: n.fat, carbs: n.carbs, limited: !!n.limited, phase: phase,
-      source: 'checkin', tdeeBasis: numOrNull(n.tdeeBasis), tdeeSource: n.tdeeSource || record.tdeeUsedForNext || 'learned',
-      deficit: numOrNull(n.deficit), rate: numOrNull(n.rate), weightUsed: numOrNull(n.weightUsed),
+      source: 'checkin', tdeeBasis: numOrNull(n.tdeeBasis), tdeeSource: tdeeSource,
+      tdeeText: n.tdeeText || (isNum(n.tdeeBasis) ? tdeeText(tdeeSource === 'formula', n.tdeeBasis, 'as of ' + from) : null),
+      deficit: numOrNull(n.deficit), rate: numOrNull(n.rate),
+      rateReason: n.rateReason || (cut && allNum(n.rate, n.weightUsed) && n.rate > 0
+        ? savedRateReason(state.setup, n.rate, n.weightUsed, 'set by ' + from) : null),
+      weightUsed: numOrNull(n.weightUsed), weightSource: n.weightSource || 'weight used by ' + from,
       targetLossKg: cut && allNum(n.rate, n.weightUsed) ? n.rate * n.weightUsed : 0,
-      bmrFloorApplied: !!n.bmrFloorApplied,
-      explanation: ['Set by the check-in of ' + formatRange(addDays(weekStart, -7)) + '.'].concat(record.notes || [])
+      bmrFloorApplied: !!n.bmrFloorApplied, explanation: null
     };
+    T.explanation = withBasisLines(['Set by ' + from + '.'].concat(record.notes || []), T);
+    return T;
   }
 
   // A week without a check-in behind it: carry the previous week, or move the whole deficit on a phase change.
@@ -597,23 +654,26 @@
     const raw = basis - deficit;
     const bmrFloorApplied = raw < bmr;
     const m = applyCalorieChange(prevT, Math.max(raw, bmr), weightUsed, calcProtein(setup).value);
+    const T = {
+      weekStart: weekStart, kcal: m.kcal, protein: m.protein, fat: m.fat, carbs: m.carbs, limited: m.limited, phase: phase,
+      source: 'transition', tdeeBasis: basis, tdeeSource: useFormula ? 'formula' : 'learned',
+      tdeeText: tdeeText(useFormula, basis, learned.text), deficit: deficit, rate: cut ? rate.value : 0,
+      rateReason: cut ? rate.reason : null, weightUsed: weightUsed, weightSource: weight.text,
+      targetLossKg: cut ? rate.value * weightUsed : 0, bmrFloorApplied: bmrFloorApplied, explanation: null
+    };
     const explanation = [
       'Phase change ' + prevT.phase.label + ' → ' + phase.label + ' (' + missing.charAt(0).toLowerCase() + missing.slice(1) + ').',
-      'Target = ' + tdeeText(useFormula, basis, learned.text) + ' − deficit ' + fmt(deficit) + ' kcal = ' + fmt(raw) +
+      'Target = ' + T.tdeeText + ' − deficit ' + fmt(deficit) + ' kcal = ' + fmt(raw) +
         ' kcal: the whole deficit moves at once (no ±' + WEEKLY_CAP + ' kcal cap).'
     ];
     if (useFormula || learned.week === null) explanation.push(formula.formula + '.');
     if (phase.type === 'final') explanation.push(finalReason(state, grw));
-    if (cut) explanation.push('Weight ' + fmt(weightUsed, 2) + ' kg: ' + weight.text + '.', rate.reason + '.', def.formula + '.');
+    Array.prototype.push.apply(explanation, basisLines(T));
     if (bmrFloorApplied) explanation.push('Raised to the BMR floor: ' + fmt(bmr) + ' kcal.');
     if (m.limited) explanation.push('Carbs are at 0 g and fat at its floor: calories cannot go lower.');
     explanation.push(changeText(prevT, m));
-    return {
-      weekStart: weekStart, kcal: m.kcal, protein: m.protein, fat: m.fat, carbs: m.carbs, limited: m.limited, phase: phase,
-      source: 'transition', tdeeBasis: basis, tdeeSource: useFormula ? 'formula' : 'learned', deficit: deficit,
-      rate: cut ? rate.value : 0, weightUsed: weightUsed, targetLossKg: cut ? rate.value * weightUsed : 0,
-      bmrFloorApplied: bmrFloorApplied, explanation: explanation
-    };
+    T.explanation = explanation;
+    return T;
   }
 
   function targetsForWeek(state, weekStart) {
@@ -645,20 +705,27 @@
     return T;
   }
 
-  // What the UI stores in state.program.snapshot once the program has started: the week-1 targets and the start weight,
-  // so Setup edits after the start cannot rewrite past weeks or lower protein. Null before the start or while the
-  // Setup is incomplete.
+  // What the UI stores in state.program.snapshot once week 1 is fixed: the week-1 targets and the start weight, so later
+  // Setup edits cannot rewrite past weeks or lower protein. Week 1 stays live from Setup until then, so the snapshot is
+  // null while the Setup is still the example, while it is incomplete, and until week 1 is over (today ≥ programStart + 7)
+  // or a check-in has been saved for a program week (the first check-in freezes week 1).
   function makeProgramSnapshot(state, todayIso) {
-    const ps = state.setup.programStart;
-    if (daysBetween(ps, todayIso) < 0) return null;
+    const setup = state.setup, ps = setup.programStart;
+    if (setup.isExample || daysBetween(ps, todayIso) < 0) return null;
+    const checkins = state.checkins || {};
+    const checkedIn = Object.keys(checkins).some(function (k) { return !!checkins[k] && isProgramWeek(state, k); });
+    const weekOver = daysBetween(ps, todayIso) >= 7;
+    if (!weekOver && !checkedIn) return null;
     const live = Object.assign({}, state, { program: null });
     const t = firstWeekTargets(live, goalReachedWeek(live));
     if (!allNum(t.kcal, t.protein, t.carbs, t.fat)) return null;
     return {
       programStart: ps, takenOn: todayIso, startWeightKg: startWeight(live).kg,
+      reason: weekOver ? 'once week 1 was over' : 'when the first check-in was saved',
       week1: {
         kcal: t.kcal, protein: t.protein, fat: t.fat, carbs: t.carbs, limited: t.limited, tdeeBasis: t.tdeeBasis,
-        tdeeSource: t.tdeeSource, deficit: t.deficit, rate: t.rate, weightUsed: t.weightUsed, targetLossKg: t.targetLossKg,
+        tdeeSource: t.tdeeSource, tdeeText: t.tdeeText, deficit: t.deficit, rate: t.rate, rateReason: t.rateReason,
+        weightUsed: t.weightUsed, weightSource: t.weightSource, targetLossKg: t.targetLossKg,
         bmrFloorApplied: t.bmrFloorApplied, phaseType: t.phase.type, explanation: t.explanation.slice()
       }
     };
@@ -698,9 +765,9 @@
     const S = weekStartOf(weekStart);
     const logs = state.logs || {};
     const all = state.checkins || {};
-    // Only earlier check-ins feed this one, so saving the same week again gives the same result.
+    // Only earlier program-week check-ins feed this one, so saving the same week again gives the same result.
     const earlier = {};
-    Object.keys(all).forEach(function (k) { if (k < S) earlier[k] = all[k]; });
+    Object.keys(all).forEach(function (k) { if (k < S && isProgramWeek(state, k)) earlier[k] = all[k]; });
     const st = Object.assign({}, state, { checkins: earlier });
     const notes = [];
 
@@ -710,11 +777,13 @@
     const bothAvg = isNum(cur.avgWeight) && isNum(prev.avgWeight);
     const deltaKg = bothAvg ? cur.avgWeight - prev.avgWeight : null;
     const actualLossKg = bothAvg ? prev.avgWeight - cur.avgWeight : null;
-    const observedTDEE = valid ? cur.avgKcal - deltaKg * KCAL_PER_KG / 7 : null;
     const formulaTDEE = calcFormulaTDEE(setup).value;
     const learnedPrev = learnedBasis(st, S);
     const learnedBefore = learnedPrev.value;
 
+    if (!isProgramWeek(state, S)) return baselineCheckin(st, S, cur, prev, valid, deltaKg, actualLossKg, formulaTDEE, learnedBefore);
+
+    const observedTDEE = valid ? cur.avgKcal - deltaKg * KCAL_PER_KG / 7 : null;
     if (valid) {
       notes.push('Observed TDEE = ' + fmt(cur.avgKcal) + ' kcal − (' + fmt(deltaKg, 2) + ' kg × ' + KCAL_PER_KG + ' / 7) = ' +
         fmt(observedTDEE) + ' kcal.');
@@ -730,16 +799,20 @@
     const lossRatio = valid && isCut && targetLossKg > 0 ? actualLossKg / targetLossKg : null;
     const belowTarget = isCut && valid && actualLossKg < STALL_RATIO * targetLossKg;
     // Last week's status comes from its saved check-in, else from its logs, so one missed check-in cannot hide a stall.
-    const prevRecord = all[addDays(S, -7)];
+    // Week 1 has no last week: the baseline week before the start is never part of the stall chain.
+    const lastWeek = addDays(S, -7);
+    const prevRecord = isProgramWeek(state, lastWeek) ? all[lastWeek] : null;
     const prevStatus = prevRecord ? { belowTarget: prevRecord.belowTarget === true, source: 'checkin' }
-      : loggedWeekStatus(st, addDays(S, -7));
+      : loggedWeekStatus(st, lastWeek);
     const stall = belowTarget && prevStatus.belowTarget;
     const diagnosis = stall ? diagnose(cur, setup) : null;
     const applied = valid && diagnosis !== 'neat' && diagnosis !== 'tracking';
     const learnedAfter = applied && isNum(learnedBefore) ? LEARN_PREV * learnedBefore + LEARN_OBSERVED * observedTDEE : learnedBefore;
 
     if (lossRatio !== null) {
-      notes.push('Lost ' + fmt(actualLossKg, 2) + ' kg vs target ' + fmt(targetLossKg, 2) + ' kg (' + fmt(lossRatio * 100) + ' %).');
+      notes.push('Lost ' + fmt(actualLossKg, 2) + ' kg vs target ' + fmt(targetLossKg, 2) + ' kg (' + fmt(lossRatio * 100) +
+        ' %). Target loss = ' + ratePct(thisT.rate) + ' % × ' + fmt(thisT.weightUsed, 2) + ' kg = ' + fmt(targetLossKg, 2) +
+        ' kg/week' + (thisT.weightSource ? '; weight: ' + thisT.weightSource : '') + '.');
     }
     if (belowTarget && prevStatus.text) notes.push(prevStatus.text);
     if (stall) notes.push('Stall: below ' + fmt(STALL_RATIO * 100) + ' % of target two weeks in a row. ' + DIAGNOSIS_TEXT[diagnosis] + '.');
@@ -755,8 +828,10 @@
     const grw = goalReached && (grwBefore === null || nextWeek < grwBefore) ? nextWeek : grwBefore;
     const nextPhase = phaseForWeek(ps, nextWeek, grw);
     if (goalReached) {
-      notes.push('Goal weight reached (' + fmt(cur.avgWeight, 2) + ' kg ≤ ' + fmt(goalWeight, 2) + ' kg): final maintenance from ' +
-        formatDate(nextWeek) + '.');
+      notes.push(grw === nextWeek ? 'Goal weight reached (' + fmt(cur.avgWeight, 2) + ' kg ≤ ' + fmt(goalWeight, 2) +
+        ' kg): final maintenance from ' + formatDate(nextWeek) + '.'
+        : 'At or below the goal weight (' + fmt(cur.avgWeight, 2) + ' kg ≤ ' + fmt(goalWeight, 2) + ' kg): final maintenance ' +
+          'continues (since ' + formatDate(grw) + ').');
     }
 
     const nextWeekNumber = programWeekIndex(ps, nextWeek) + 1;
@@ -772,7 +847,7 @@
 
     const record = {
       weekStart: S, computedOn: null, // the caller stamps the date it saves the record
-      valid: valid, cur: cur, prev: prev, deltaKg: deltaKg, observedTDEE: observedTDEE,
+      baseline: false, valid: valid, cur: cur, prev: prev, deltaKg: deltaKg, observedTDEE: observedTDEE,
       learnedBefore: learnedBefore, learnedAfter: learnedAfter, formulaTDEE: formulaTDEE, tdeeUsedForNext: tdeeUsedForNext,
       targetLossKg: targetLossKg, actualLossKg: actualLossKg, lossRatio: lossRatio, belowTarget: belowTarget,
       prevBelowTarget: prevStatus.belowTarget, prevBelowTargetSource: prevStatus.source, stall: stall,
@@ -783,51 +858,79 @@
     if (!allNum(thisT.kcal, bmr, basis, weightNow)) {
       notes.push('Complete the Setup (weight, height, age) to compute targets.');
       record.next = { kcal: null, protein: null, fat: null, carbs: null, limited: false, phase: nextPhase, tdeeBasis: null,
-        tdeeSource: tdeeUsedForNext, deficit: null, rate: null, weightUsed: null, targetLossKg: 0, bmrFloorApplied: false };
+        tdeeSource: tdeeUsedForNext, tdeeText: null, deficit: null, rate: null, rateReason: null, weightUsed: null,
+        weightSource: null, targetLossKg: 0, bmrFloorApplied: false };
       return record;
     }
 
     const rate = nextCut ? weeklyRate(setup, weightNow) : null;
     const deficitNext = nextCut ? dailyDeficit(rate, weightNow).value : 0;
     const raw = basis - deficitNext;
+    // What next week's targets rest on: this week's own basis when they stay unchanged, else the new one.
+    const nextBasis = unchanged ? Object.assign({}, thisT, { phase: nextPhase }) : {
+      phase: nextPhase, tdeeBasis: basis, tdeeSource: tdeeUsedForNext,
+      tdeeText: tdeeText(tdeeUsedForNext === 'formula', basis, applied ? 'updated by this check-in' : learnedPrev.text),
+      deficit: deficitNext, rate: nextCut ? rate.value : 0, rateReason: nextCut ? rate.reason : null,
+      weightUsed: weightNow, weightSource: weightSrc.text
+    };
     let kcal;
-    const derivation = tdeeText(tdeeUsedForNext === 'formula', basis, applied ? 'updated by this check-in' : learnedPrev.text) +
-      ' − deficit ' + fmt(deficitNext) + ' kcal = ' + fmt(raw) + ' kcal';
+    const derivation = nextBasis.tdeeText + ' − deficit ' + fmt(deficitNext) + ' kcal = ' + fmt(raw) + ' kcal';
     if (unchanged) {
       kcal = thisT.kcal;
-      notes.push(diagnosis === 'neat' ? 'Targets unchanged: restore the steps before cutting food.'
+      notes.push((diagnosis === 'neat' ? 'Targets unchanged: restore the steps before cutting food.'
         : diagnosis === 'tracking' ? 'Targets unchanged until tracking is complete (fewer than ' + MIN_TRACKED_DAYS + ' days logged).'
-          : 'Targets unchanged (not enough data).');
+          : 'Targets unchanged (not enough data).') + ' Next week keeps the ' + fmt(thisT.kcal) + ' kcal target of ' +
+        formatRange(S) + '.');
     } else if (transition) {
       kcal = raw;
       notes.push('Phase change ' + thisT.phase.label + ' → ' + nextPhase.label + ': ' + derivation +
         ' (the whole deficit moves at once, no ±' + WEEKLY_CAP + ' kcal cap).');
-      if (nextCut) notes.push('Weight ' + fmt(weightNow, 2) + ' kg: ' + weightSrc.text + '. ' + rate.reason + '.');
     } else {
       kcal = Math.min(Math.max(raw, thisT.kcal - WEEKLY_CAP), thisT.kcal + WEEKLY_CAP);
       record.capped = kcal !== raw;
       notes.push('Next week: ' + derivation + (record.capped ? ', capped at ' + fmt(kcal) + ' kcal (±' + WEEKLY_CAP +
         ' kcal per week inside a phase)' : '') + '.');
     }
+    Array.prototype.push.apply(notes, basisLines(nextBasis));
     const bmrFloorApplied = kcal < bmr;
     if (bmrFloorApplied) notes.push('Raised to the BMR floor: ' + fmt(bmr) + ' kcal.');
     kcal = Math.max(kcal, bmr);
 
-    const weightUsed = unchanged ? thisT.weightUsed : weightNow;
-    const m = applyCalorieChange(thisT, kcal, weightUsed, calcProtein(setup).value);
+    const m = applyCalorieChange(thisT, kcal, nextBasis.weightUsed, calcProtein(setup).value);
     if (m.limited) notes.push('Carbs are at 0 g and fat at its floor: calories cannot go lower.');
     if (!unchanged) notes.push(changeText(thisT, m));
-    const nextRate = unchanged ? thisT.rate : (nextCut ? rate.value : 0);
     record.next = {
       kcal: m.kcal, protein: m.protein, fat: m.fat, carbs: m.carbs, limited: m.limited, phase: nextPhase,
-      tdeeBasis: unchanged ? thisT.tdeeBasis : basis,
-      tdeeSource: unchanged ? thisT.tdeeSource : tdeeUsedForNext,
-      deficit: unchanged ? thisT.deficit : deficitNext,
-      rate: nextRate, weightUsed: weightUsed,
-      targetLossKg: nextCut && allNum(nextRate, weightUsed) ? nextRate * weightUsed : 0,
+      tdeeBasis: nextBasis.tdeeBasis, tdeeSource: nextBasis.tdeeSource, tdeeText: nextBasis.tdeeText,
+      deficit: nextBasis.deficit, rate: nextBasis.rate, rateReason: nextBasis.rateReason,
+      weightUsed: nextBasis.weightUsed, weightSource: nextBasis.weightSource,
+      targetLossKg: nextCut && allNum(nextBasis.rate, nextBasis.weightUsed) ? nextBasis.rate * nextBasis.weightUsed : 0,
       bmrFloorApplied: bmrFloorApplied
     };
     return record;
+  }
+
+  // A week before the program start is a baseline only: its record shows the averages and changes nothing. No observed or
+  // learned TDEE update, no stall or goal test, and `next` is the preview of the targets of the week after (week 1 comes
+  // from Setup). Such a record is ignored even if saved (isProgramWeek).
+  function baselineCheckin(st, S, cur, prev, valid, deltaKg, actualLossKg, formulaTDEE, learnedBefore) {
+    const ps = st.setup.programStart, base = addDays(ps, -7);
+    const t = targetsForWeek(st, addDays(S, 7));
+    return {
+      weekStart: S, computedOn: null, baseline: true, valid: valid, cur: cur, prev: prev, deltaKg: deltaKg, observedTDEE: null,
+      learnedBefore: learnedBefore, learnedAfter: learnedBefore, formulaTDEE: formulaTDEE, tdeeUsedForNext: 'formula',
+      targetLossKg: 0, actualLossKg: actualLossKg, lossRatio: null, belowTarget: false, prevBelowTarget: false,
+      prevBelowTargetSource: null, stall: false, diagnosis: null, diagnosisText: null, applied: false, goalReached: false,
+      capped: false, transition: false,
+      next: { kcal: t.kcal, protein: t.protein, fat: t.fat, carbs: t.carbs, limited: t.limited, phase: t.phase,
+        tdeeBasis: t.tdeeBasis, tdeeSource: t.tdeeSource, tdeeText: t.tdeeText, deficit: t.deficit, rate: t.rate,
+        rateReason: t.rateReason, weightUsed: t.weightUsed, weightSource: t.weightSource, targetLossKg: t.targetLossKg,
+        bmrFloorApplied: t.bmrFloorApplied },
+      notes: [(S === base ? formatRange(S) + ' is the baseline week: its averages are what the check-in of week 1 (' +
+        formatRange(ps) + ') compares against.' : formatRange(S) + ' is before the program: the baseline week is ' + formatRange(base) + '.') +
+        ' The program starts ' + formatDate(ps) + ' (dinner), so this week changes nothing: no learned-TDEE update, no stall or ' +
+        'goal check, and week-1 targets come from Setup.']
+    };
   }
 
   // ======================================================================================
@@ -853,15 +956,20 @@
       text: '7-day average of ' + trail.count + ' weigh-ins, ' + formatDate(addDays(todayIso, -6)) + ' – ' + formatDate(todayIso) }
       : weightBasis(state, addDays(ws, 7));
     const fromWeight = from.kg;
-    if (!isNum(fromWeight)) return { weightKg: null, fromWeight: null, weeks: 0, blockEnd: block.blockEnd, explanation: ['No weight known yet.'] };
+    // Final maintenance has no block end: the number is the weight it holds at, not a projection.
+    const weightLabel = block.blockEnd ? 'Projected at block end' : 'Holding at';
+    if (!isNum(fromWeight)) {
+      return { weightKg: null, fromWeight: null, weeks: 0, blockEnd: block.blockEnd, weightLabel: weightLabel, explanation: ['No weight known yet.'] };
+    }
 
     const explanation = [];
     if (pre) explanation.push('Program starts ' + formatDate(ps) + ' (dinner): ' + block.label + ' is projected from the start.');
-    explanation.push('Start: ' + fmt(fromWeight, 2) + ' kg (' + from.text + ').');
     if (!block.blockEnd) {
-      explanation.push(finalReason(state, grw), 'Final maintenance: weight held at ' + fmt(fromWeight, 2) + ' kg.');
-      return { weightKg: fromWeight, fromWeight: fromWeight, weeks: 0, blockEnd: null, explanation: explanation };
+      explanation.push(finalReason(state, grw), 'Final maintenance has no block end: calories stay at maintenance with no end date, ' +
+        'holding at ' + fmt(fromWeight, 2) + ' kg (' + from.text + ').');
+      return { weightKg: fromWeight, fromWeight: fromWeight, weeks: 0, blockEnd: null, weightLabel: weightLabel, explanation: explanation };
     }
+    explanation.push('Start: ' + fmt(fromWeight, 2) + ' kg (' + from.text + ').');
     // The block ends at Friday dinner, so its full effect shows on the next morning's weigh-in (Saturday):
     // a whole 8-week cut counts as 8 weeks of loss.
     const weeks = Math.max(0, daysBetween(pre ? ps : todayIso, addDays(block.blockEnd, 1)) / 7);
@@ -885,7 +993,7 @@
       explanation.push(block.label + ': maintenance, weight held at ' + fmt(kg, 2) + ' kg for ' + fmt(weeks, 1) + ' weeks until ' +
         formatDate(block.blockEnd) + ' (dinner).');
     }
-    return { weightKg: kg, fromWeight: fromWeight, weeks: weeks, blockEnd: block.blockEnd, explanation: explanation };
+    return { weightKg: kg, fromWeight: fromWeight, weeks: weeks, blockEnd: block.blockEnd, weightLabel: weightLabel, explanation: explanation };
   }
 
   function targetLine(state, fromIso, toIso) {
@@ -917,6 +1025,7 @@
     const grw = goalReachedWeek(state);
     const phase = phaseForWeek(ps, weekStart, grw);
     const goal = calcGoalWeight(setup);
+    const projection = projectBlockEnd(state, todayIso);
 
     const explanation = [phase.type === 'pre' ? 'Program starts ' + formatDate(ps) + ' (dinner), in ' + daysBetween(todayIso, ps) + ' days.'
       : 'Program week ' + phase.weekNumber + ', counted in diet weeks (Saturday dinner → Friday dinner) from ' + formatDate(ps) + '.'];
@@ -924,6 +1033,9 @@
       explanation.push(phase.label + ': week ' + phase.weekInBlock + ' of ' + phase.blockLength + ', ' + formatDate(phase.blockStart) +
         ' – ' + formatDate(phase.blockEnd) + ' (dinner). Blocks repeat an ' + CUT_WEEKS + '-week cut and a ' + BREAK_WEEKS +
         '-week maintenance break until the goal is reached.');
+    } else if (phase.type === 'final') {
+      explanation.push('Final maintenance: week ' + phase.weekInBlock + ', since ' + formatDate(phase.blockStart) + ' (dinner). It has ' +
+        'no block end' + (isNum(projection.weightKg) ? ': holding at ' + fmt(projection.weightKg, 2) + ' kg' : '') + '.');
     }
     if (grw && daysBetween(grw, phase.type === 'pre' ? ps : weekStart) >= 0) explanation.push(finalReason(state, grw));
     explanation.push(goal.formula + '.');
@@ -941,7 +1053,7 @@
 
     return {
       weekStart: weekStart, phase: phase, targets: targetsForWeek(state, weekStart), blockEnd: phase.blockEnd,
-      projection: projectBlockEnd(state, todayIso), nextCheckinDate: nextCheckinDate, checkinDue: checkinDue,
+      projection: projection, nextCheckinDate: nextCheckinDate, checkinDue: checkinDue,
       goalWeight: goal.value, explanation: explanation
     };
   }

@@ -115,6 +115,40 @@ test('rows without a price never beat priced rows', function () {
   assert.equal(br.stores.Colruyt.items[0].row.id, 'b');
 });
 
+test('a current price beats a cheaper stale row at the same store; stale rows count only when nothing is current', function () {
+  const today = '2026-09-25';
+  const q = [{ foodId: 'skyr', grams: 1295, perMeal: [] }];
+  const seed = row('d-skyr', 'Delhaize', 'skyr', 500, 2.49, { source: 'estimate', date: null, ean: '5400119538442' });
+  // The verification case: an imported Delhaize skyr row mapped to the food, next to the cheaper seed estimate.
+  const mapped = G.mapImportRow([seed], { store: 'Delhaize', ean: '5400119000000', product: 'Delhaize Skyr natuur 0% 450 g',
+    pack_size_g: 450, price_eur: 2.79, promo: false, date: today }, 'skyr');
+  let br = G.storeBreakdown(q, mapped, today);
+  let it = br.stores.Delhaize.items[0];
+  assert.equal(it.row.product, 'Delhaize Skyr natuur 0% 450 g');
+  assert.deepEqual([it.packs, it.cost, it.leftoverG, it.stale.stale], [3, 8.37, 55, false]);
+  assert.equal(br.stores.Delhaize.staleCount, 0);
+  assert.equal(br.stores.Delhaize.total, 8.37);
+  assert.equal(br.cheapest.items[0].row.product, 'Delhaize Skyr natuur 0% 450 g');
+  // A hand-entered row beats an old import too; among current rows the cheapest still wins.
+  const old = row('d-old', 'Delhaize', 'skyr', 500, 1.99, { date: '2026-09-01' });
+  const manual = row('d-man', 'Delhaize', 'skyr', 500, 2.99, { source: 'manual', date: today });
+  const cheapFresh = row('d-fresh', 'Delhaize', 'skyr', 500, 2.59, { date: '2026-09-20' });
+  it = G.storeBreakdown(q, [old, manual], today).stores.Delhaize.items[0];
+  assert.equal(it.row.id, 'd-man');
+  it = G.storeBreakdown(q, [old, manual, cheapFresh, seed], today).stores.Delhaize.items[0];
+  assert.equal(it.row.id, 'd-fresh');
+  // All rows stale: the cheapest of them, still flagged.
+  br = G.storeBreakdown(q, [old, seed], today);
+  it = br.stores.Delhaize.items[0];
+  assert.equal(it.row.id, 'd-old');
+  assert.equal(it.stale.reason, 'older than 7 days');
+  assert.equal(br.stores.Delhaize.staleCount, 1);
+  // A current row without a price does not push out a priced stale row.
+  it = G.storeBreakdown(q, [row('d-noprice', 'Delhaize', 'skyr', 500, null), seed], today).stores.Delhaize.items[0];
+  assert.equal(it.row.id, 'd-skyr');
+  assert.equal(it.stale.reason, 'estimate');
+});
+
 test('export has the documented shape', function () {
   const q = G.weeklyQuantities(PLAN4, 'offplan');
   const products = [row('c-eggs', 'Colruyt', 'eggs', 550, 3.19, { ean: '5400141000001', product: 'Boni eieren 10 st', url: 'https://example.org/eggs' })];

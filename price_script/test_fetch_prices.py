@@ -343,6 +343,54 @@ class ReviewFindingTests(unittest.TestCase):
         c, _, how = fp.best_match(row, cands)
         self.assertEqual((how, c["price_eur"]), ("product code", 3.29))
 
+    def test_drained_weights_are_not_converted_again(self):
+        # Verification pass: Colruyt's 'BONI tonijn in eigen nat MSC 95g' is stored as 95 g drained, and the blanket
+        # 0.7 ratio made it 66.5 g (+43 % on the tuna cost after an import).
+        export = {"items": [{"food_id": "tuna_water", "food": "Tuna in water (drained)", "food_nl": "Tonijn in water", "unit_g": None,
+                             "drained_ratio": 0.7, "g_per_ml": None, "weekly_g": 630,
+                             "stores": {"Colruyt": [{"ean": "", "product": "BONI tonijn in eigen nat MSC 95g", "pack_size_g": 95,
+                                                     "url": "https://www.colruyt.be/nl/producten/11510"}],
+                                        "Delhaize": [{"ean": "", "product": "365 | Delhaize | Tonijn | Eigen nat | 3 x 150 gr",
+                                                      "pack_size_g": 315, "url": ""}]}}]}
+        raw = [{"searchTerm": "BONI tonijn in eigen nat MSC", "name": "BONI tonijn in eigen nat MSC 95g", "price": 1.39,
+                "url": "https://www.colruyt.be/nl/producten/11510"}]
+        rows, report = fp.match_store(export, "Colruyt", raw, "2026-09-25")
+        self.assertEqual([(r["product"], r["pack_size_g"]) for r in rows], [("BONI tonijn in eigen nat MSC 95g", 95.0)], report)
+        # The table row's pack size (315 g drained) is far from the label's 450 g: the label is net weight, so convert.
+        raw = [{"searchTerm": "365 | Delhaize | Tonijn | Eigen nat |", "name": "365 | Delhaize | Tonijn | Eigen nat | 3 x 150 gr", "price": 5.49}]
+        rows, _ = fp.match_store(export, "Delhaize", raw, "2026-09-25")
+        self.assertEqual(rows[0]["pack_size_g"], 315)
+        # Within 10 % of the row's own size counts as drained (a relabelled 100 g can for the 95 g row), beyond it not.
+        c = fp.normalize_item({"name": "BONI tonijn 100 g", "price": 1.49}, drained_ratio=0.7)
+        self.assertEqual((c["pack_size_g"], c["label_g"]), (70.0, 100.0))
+        self.assertEqual(fp.pack_for_row(c, {"pack_size_g": 95}), 100.0)
+        self.assertEqual(fp.pack_for_row(c, {"pack_size_g": 90}), 70.0)
+        self.assertEqual(fp.pack_for_row(c, {"pack_size_g": None}), 70.0)
+        self.assertEqual(fp.pack_for_row(c, None), 70.0)
+        # The pack-size bonus in name matching uses the same size.
+        best, _, how = fp.best_match({"ean": "", "product": "BONI tonijn 100 g", "pack_size_g": 100},
+                                     [c, dict(fp.normalize_item({"name": "BONI tonijn 3 x 100 g", "price": 3.99}, drained_ratio=0.7))])
+        self.assertEqual((how, best["price_eur"]), ("name", 1.49))
+
+    def test_listing_that_states_the_drained_weight(self):
+        cases = [
+            ({"name": "BONI tonijn in olijfolie", "content": "Netto uitgelekt gewicht 95 g", "price": 1.59}, 95),
+            ({"name": "Carrefour thon au naturel", "size": "Poids net égoutté : 112 g", "price": 1.29}, 112),
+            ({"name": "Tonijn in water 160 g (112 g uitgelekt)", "price": 1.29}, 112),
+            ({"name": "Tonijn 3 x 52 g uitgelekt", "price": 2.99}, 156),
+            ({"name": "Tuna chunks in water, drained weight 1,2 kg", "price": 9.99}, 1200),
+            ({"name": "Tonijn uitgelekt", "content": "95 g", "price": 1.39}, 95),
+            ({"name": "Tonijn", "drainedWeight": "120 g", "content": "160 g", "price": 1.39}, 120),
+            ({"name": "Kikkererwten", "size": "400 g", "price": 0.89}, 280),
+        ]
+        for raw, grams in cases:
+            c = fp.normalize_item(raw, drained_ratio=0.7)
+            self.assertEqual(c["pack_size_g"], grams, raw)
+        self.assertNotIn("label_g", fp.normalize_item(cases[0][0], drained_ratio=0.7), "nothing to undo when no ratio was applied")
+        self.assertEqual(fp.drained_info("Tonijn 160g"), (False, None))
+        self.assertEqual(fp.drained_info("Égoutté"), (True, None))
+        self.assertEqual(fp.drained_info({"value": 95, "unit": "g uitgelekt"}), (True, 95.0))
+
     def test_gtin14_matches_ean13(self):
         # Finding 37: a zero-padded GTIN-14 is the same product as the table's EAN-13.
         cand = fp.normalize_item({"name": "BONI Skyr natuur 500g", "price": 1.29, "gtin": "05400141571738", "content": "500 g"})

@@ -56,14 +56,18 @@
     return { stale: false, reason: null, ageDays: ageDays };
   }
 
-  // Lowest-cost row for a need; rows without a usable price lose to rows with one.
-  function bestRow(rows, needG) {
+  // The row a store's line uses: the lowest-cost row among those with a current price (not stale), so a fresh
+  // imported, mapped or hand-entered price beats a cheaper estimate or an old price. Only when no priced row is
+  // current does the cheapest stale row count (its line keeps the stale flag). Rows without a usable price lose to
+  // rows with one; on equal cost the earlier row wins.
+  function bestRow(rows, needG, todayIso) {
     let best = null;
     rows.forEach(function (r) {
       const p = packsFor(needG, r);
-      if (!best) { best = { row: r, p: p }; return; }
+      const c = { row: r, p: p, fresh: p.cost !== null && !isStale(r, todayIso).stale };
+      if (!best) { best = c; return; }
       if (p.cost === null) return;
-      if (best.p.cost === null || p.cost < best.p.cost) best = { row: r, p: p };
+      if (best.p.cost === null || (c.fresh && !best.fresh) || (c.fresh === best.fresh && p.cost < best.p.cost)) best = c;
     });
     return best;
   }
@@ -82,7 +86,7 @@
           s.items.push({ foodId: q.foodId, needG: q.grams, row: null, packs: null, cost: null, leftoverG: null, stale: null });
           return;
         }
-        const b = bestRow(rows, q.grams);
+        const b = bestRow(rows, q.grams, todayIso);
         const stale = isStale(b.row, todayIso);
         const item = { foodId: q.foodId, needG: q.grams, row: b.row, packs: b.p.packs, cost: b.p.cost, leftoverG: b.p.leftoverG, stale: stale };
         s.items.push(item);

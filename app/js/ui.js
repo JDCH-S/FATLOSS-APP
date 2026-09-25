@@ -126,10 +126,13 @@
       (bad.length > 1 ? 'them' : 'it') + ' in its meal. ' + (bad.length > 1 ? 'They are' : 'It is') + ' left off the grocery list. Like another food of that kind, or regenerate the plan.</div>';
   }
 
+  // Carb portions may exceed their per-meal cap only to fit a maintenance phase, never an ordinary cut adjustment.
+  function stretchOpts(T) { return { allowCarbStretch: !!(T && T.phase && T.phase.type !== 'cut') }; }
+
   function planForWeek(c, week) {
     if (!state.plan || !state.plan.base) return null;
     const T = E.targetsForWeek(state, week);
-    const res = M.rescalePlan(state.plan.base, c.foods, macros(T));
+    const res = M.rescalePlan(state.plan.base, c.foods, macros(T), stretchOpts(T));
     return { plan: res.plan, targets: T };
   }
 
@@ -152,8 +155,11 @@
       if (snap) { state.program = Object.assign({}, state.program, { snapshot: null }); S.save('program', state); }
       return;
     }
-    if (snap && snap.programStart === ps) return;
+    // Older versions froze week 1 on the start day itself (possibly from example values): retake those.
+    const premature = snap && !snap.reason && snap.takenOn && snap.takenOn < E.addDays(ps, 7);
+    if (snap && snap.programStart === ps && !premature) return;
     const next = E.makeProgramSnapshot(state, today);
+    if (!next && premature) { state.program = Object.assign({}, state.program, { snapshot: null }); S.save('program', state); return; }
     if (!next) return;
     state.program = Object.assign({}, state.program || {}, { snapshot: next });
     S.save('program', state);
@@ -321,9 +327,8 @@
       if (ph.blockEnd) parts.push('<span>Block ends <b>' + esc(E.formatDate(ph.blockEnd)) + '</b>, dinner</span>');
     }
     if (sum.projection && isNum(sum.projection.weightKg)) {
-      parts.push(ph.type === 'final'
-        ? '<span>Holding at about <b>' + fmt(sum.projection.weightKg, 1) + ' kg</b> (no block end)</span>'
-        : '<span>Projected at block end <b>' + fmt(sum.projection.weightKg, 1) + ' kg</b></span>');
+      const label = sum.projection.weightLabel || (ph.type === 'final' ? 'Holding at' : 'Projected at block end');
+      parts.push('<span>' + esc(label) + ' <b>' + fmt(sum.projection.weightKg, 1) + ' kg</b>' + (ph.type === 'final' ? ' (no block end)' : '') + '</span>');
     }
     parts.push('<span>' + (ph.type === 'pre' ? 'Week-1 targets' : 'Today') + ' <b>' + fmt(T.kcal) + ' kcal</b> · P ' + fmt(T.protein) +
       ' · C ' + fmt(T.carbs) + ' · F ' + fmt(T.fat) + ' g</span>');
@@ -454,7 +459,8 @@
       }).join('') + '</tbody></table></div>' +
       '<p class="note">Weeks 1–2 use this formula TDEE. From week 3 the weekly check-in uses your learned TDEE instead (see Weekly Check-in).</p>' +
       (state.program && state.program.snapshot && state.program.snapshot.programStart === s.programStart
-        ? '<p class="note">Week-1 targets were fixed on ' + esc(dateLong(state.program.snapshot.takenOn)) + ', when the program started, so Setup changes no longer rewrite past weeks. ' +
+        ? '<p class="note">Week-1 targets were fixed on ' + esc(dateLong(state.program.snapshot.takenOn)) + ', ' + esc(state.program.snapshot.reason || 'when the program started') +
+          ', so Setup changes no longer rewrite past weeks. ' +
           'They take effect through the next check-in, and protein never drops below ' + fmt(state.program.snapshot.week1.protein) + ' g. To restart the program with new numbers, change the program start.</p>'
         : '');
     return block('Starting calculations', body);
@@ -888,9 +894,6 @@
     // The engine's notes explain the observed/learned TDEE, cap, transition and macro split; add what they leave out.
     const notes = (rec.notes || []).slice();
     const said = notes.join(' ').toLowerCase();
-    if (nx.deficit && said.indexOf('deficit ' + fmt(nx.deficit).toLowerCase()) < 0) {
-      notes.unshift('Deficit ' + fmt(nx.deficit) + ' kcal/day = ' + fmt((nx.rate || 0) * 100, 2) + ' % × ' + fmt(nx.weightUsed, 1) + ' kg × 7700 / 7.');
-    }
     if (rec.capped && said.indexOf('cap') < 0) notes.push('The change was capped at ±200 kcal for this week.');
     if (nx.bmrFloorApplied && said.indexOf('bmr') < 0) notes.push('Raised to the calorie floor (BMR).');
 
@@ -916,7 +919,12 @@
     h.push(block('History', historyTable()));
     return h.join('');
   }
-  function stripMeta(r) { const x = clone(r); delete x.computedOn; return x; }
+  // The numbers a check-in decides with; wording and added fields may differ between app versions.
+  function stripMeta(r) {
+    const n = r.next || {};
+    const avg = function (a) { a = a || {}; return [a.avgWeight, a.weighIns, a.avgKcal, a.intakeDays, a.avgSteps]; };
+    return [avg(r.cur), avg(r.prev), r.observedTDEE, r.learnedAfter, r.diagnosis, r.applied, n.kcal, n.protein, n.fat, n.carbs, (n.phase || {}).type];
+  }
   function avgRow(label, a, b, d, unit) {
     const diff = isNum(a) && isNum(b) ? b - a : null;
     return '<tr><td>' + esc(label) + '</td><td class="n">' + (isNum(a) ? fmt(a, d) + unit : '–') + '</td><td class="n">' + (isNum(b) ? fmt(b, d) + unit : '–') +
@@ -1096,7 +1104,7 @@
     const prevWeek = E.addDays(week, -7);
     const prevT = E.targetsForWeek(state, prevWeek);
     const recorded = (state.plan.history || {})[prevWeek];
-    const prevPlan = recorded ? { meals: recorded } : M.rescalePlan(state.plan.base, c.foods, macros(prevT)).plan;
+    const prevPlan = recorded ? { meals: recorded } : M.rescalePlan(state.plan.base, c.foods, macros(prevT), stretchOpts(prevT)).plan;
     h.push(block('Changes vs last week', planDiff(c, prevPlan, plan, prevT, T, !recorded)));
     return h.join('');
   }
@@ -1316,7 +1324,7 @@
         let base = kept[v];
         const usable = base && base.meals.every(function (m) { return m.items.every(function (it) { return c.liked.indexOf(it.foodId) >= 0; }); });
         if (usable) {
-          base = M.rescalePlan(base, c.foods, macros(T)).plan;
+          base = M.rescalePlan(base, c.foods, macros(T), stretchOpts(T)).plan;
           ui.setupNote = 'Meals per day is now ' + v + ': your earlier ' + v + '-meal plan is back, including its swaps.';
         } else {
           base = M.generatePlan({ foods: c.foods, liked: c.liked, excluded: c.excluded, targets: macros(T), mealsPerDay: v });
@@ -1368,6 +1376,7 @@
       ui.checkinMsg = { kind: ui.readOnly ? 'warn' : 'good', text: 'Check-in saved. New targets apply from ' + E.formatDate(E.addDays(week, 7)) + ' dinner; the meal plan and grocery list use them now.' +
         (later.length ? ' Later check-ins were computed from the old values: open and save them again in order.' : '') + savedWhere() };
       commit('checkins');
+      ensureProgramSnapshot();
     },
     'plan-week': function (el) { ui.planWeek = el.dataset.value; scheduleRender(); },
     'plan-generate': function () { ui.focusAfter = 'plan-regenerate'; generatePlan(); },
@@ -1452,7 +1461,12 @@
         resetDraft(todayIso());
         ui.backupMsg = { kind: 'good', text: 'Backup restored.' };
         S.saveAll(state).then(function (ok) {
-          if (!ok) { ui.backupMsg = { kind: 'bad', text: 'The backup is loaded on this page but could not be saved. Check the save status at the top and try again.' }; scheduleRender(); }
+          if (!ok) {
+            ui.backupMsg = S.mode && S.mode() === 'device-only'
+              ? { kind: 'warn', text: 'Backup restored on this device. Your account could not be reached; it syncs after a successful reload.' }
+              : { kind: 'bad', text: 'The backup is loaded on this page but could not be saved. Check the save status at the top and try again.' };
+            scheduleRender();
+          }
         });
         ensureProgramSnapshot();
         scheduleRender();
@@ -1715,7 +1729,7 @@
     tab = name;
     ui.confirm = null;
     if (name === 'log' && !draftDirty()) { resetDraft(todayIso()); ui.logMsg = null; }
-    if (state && !ui.readOnly) ensureProgramSnapshot();
+    if (state) ensureProgramSnapshot();
     if ((name === 'plan' || name === 'groceries') && state && recordPlanWeek(ctx())) S.save('plan', state);
     try { root.history.replaceState(null, '', '#' + name); } catch (e) { /* sandboxed */ }
     render();
@@ -1741,9 +1755,7 @@
     backend = res.backend;
     ui.readOnly = !!res.readOnly;
     if (res.error) {
-      ui.loadError = res.readOnly
-        ? { kind: 'bad', text: res.error + ' Nothing you change now is saved. Reload the page to try again.' }
-        : { kind: 'warn', text: res.error };
+      ui.loadError = { kind: res.readOnly ? 'bad' : 'warn', text: res.error };
     }
     // Keep the program start on a Saturday even if older data says otherwise.
     if (state.setup.programStart && E.dayOfWeek(state.setup.programStart) !== 6) state.setup.programStart = E.nextSaturdayOnOrAfter(state.setup.programStart);
@@ -1757,10 +1769,11 @@
       if (t === lastDay) return;
       lastDay = t;
       if (ui.logDraft && ui.logDraft.followToday && !draftDirty()) resetDraft(t);
-      if (!ui.readOnly) ensureProgramSnapshot();
+      ensureProgramSnapshot();
       scheduleRender();
     }, 30000);
-    if (res.readOnly) setSaveState('error', 'Not saving: ' + res.error); else { setSaveState('saved'); ensureProgramSnapshot(); }
+    if (res.readOnly) setSaveState('error', 'Saved on this device only'); else setSaveState('saved');
+    ensureProgramSnapshot();
     setTab(tab);
   }
 

@@ -10,12 +10,16 @@
  *   4. grow vegetable portions until fibre ≥ 25 g (re-solving the meal each time);
  *   5. day-level greedy correction: ±1 step moves scored by a weighted error, until no move improves;
  *   6. if the day still breaks a rule: repair (one or two items moved to any portion, scored against the
- *      published limits), then alternative foods (deterministic local search) and a repair of the best choice.
+ *      published limits; failing that, one meal re-solved as a whole: bounded least squares towards targets across
+ *      the limit box, rounded, ±1-step search), then alternative foods (deterministic local search) and a repair of
+ *      the best choice.
  * rescalePlan keeps foods and meals: protein items follow a protein-target change, then the energy change goes to
- * carb items (shares proportional to their carb grams) and, once those hit their bounds, to fat items (an increase
- * the carbs cannot hold stretches them to 1.25 × their maximum once fat is 10 % above its target). Protein drift and
- * fibre are then restored (protein items, produce) with the energy re-balanced through carbs, and a repair runs if
- * a published limit still fails.
+ * carb items (shares proportional to their carb grams, within their per-meal maximum) and, once those hit their
+ * bounds, to fat items. An increase the carbs cannot hold goes to fat while the day's fat stays within +20 % of its
+ * target; only a large increase (≥ 300 kcal: a phase change such as a maintenance break) may then stretch carb items
+ * to 1.25 × their maximum; fat past +20 % only as far as the kcal limit needs. Protein drift and fibre are then
+ * restored (protein items, produce) with the energy re-balanced through carbs, and a repair runs if a published limit
+ * still fails.
  * swapFood replaces one item and re-solves only that meal towards its previous totals; replaceDisallowed does the
  * same for every item whose food is no longer allowed.
  * Warnings are always checkPlan's issues, so they describe the plan as it is.
@@ -41,9 +45,11 @@
   const MAX_REPAIR_ROUNDS = 8;
   const MAX_SEARCH_ROUNDS = 4;
   const MAX_SEARCH_EVALS = 150;    // bounds the food-choice search (each evaluation is a full day solve)
-  const CARB_STRETCH = 1.25;       // a rescaled increase may stretch carb portions to 1.25 × their maximum…
-  const FAT_ROOM_PCT = 10;         // …once fat items took what keeps the day's fat within 10 % of its target
   const FAT_HIGH_PCT = 20;         // fat further above its target than this is reported
+  const CARB_STRETCH = 1.25;       // a large rescaled increase may stretch carb portions to 1.25 × their maximum…
+  const LARGE_INCREASE_KCAL = 300; // …when the kcal target rises by at least this much (a phase change such as a
+                                   // maintenance break; weekly check-ins move ≤ 200 kcal) and carbs at their maximum
+                                   // plus fat up to FAT_HIGH_PCT above its target still leave the day short
 
   // Internal nutrient vectors: [kcal, protein, carbs, fat, fibre] per gram.
   const K = 0, P = 1, C = 2, FA = 3, FI = 4;
@@ -488,14 +494,16 @@
   // rice cakes). Each round applies the move that most reduces the kcal/protein/fibre violation without breaking a
   // rule that holds (the fat floor included; ties: lowest `scorer(totals, mealTotals)`, as in correct), until those
   // rules hold; if they never all hold, every portion goes back to where it was (a partial fix is not worth odd
-  // portions). For the second item only the portions next to a rule boundary (and its bounds) are tried: the
-  // violation is piecewise linear in its grams, so its minimum lies there. `offset` holds the day totals outside
-  // `meals`.
+  // portions) and resolveMeals re-solves one meal as a whole instead (for fixes that need three or more portions of
+  // a meal to move together). For the second item only the portions next to a rule boundary (and its bounds) are
+  // tried: the violation is piecewise linear in its grams, so its minimum lies there. `offset` holds the day totals
+  // outside `meals`. Neither stage is exhaustive: a fix that needs portions in two meals to move together, or that
+  // lies between the re-solve's targets, can be missed.
   function repair(meals, movable, T, scorer, offset) {
     const start = movable.map(function (ref) { return meals[ref.m].items[ref.i].grams; });
-    if (!repairRounds(meals, movable, T, scorer, offset)) {
-      movable.forEach(function (ref, i) { meals[ref.m].items[ref.i].grams = start[i]; });
-    }
+    if (repairRounds(meals, movable, T, scorer, offset)) return;
+    movable.forEach(function (ref, i) { meals[ref.m].items[ref.i].grams = start[i]; });
+    resolveMeals(meals, movable, T, scorer, offset);
   }
 
   // The rounds of repair; true when the kcal, protein and fibre rules end up met.
@@ -573,6 +581,124 @@
     for (let k = 0; k < 5; k++) day[k] = tot[k] + offset[k];
     const parts = limitParts(day, T);
     return parts[0] + parts[1] + parts[2] === 0;
+  }
+
+  // Re-solves of resolveMeals as [kcal offset %, protein offset g, row weights]: the day's exact targets with the
+  // solver's own row weights, then a 5 × 5 grid of targets across the published box (kcal 0, ±2.5, ±4.5 %; protein
+  // 0, ±5, ±9 g: inside the limits with a little room for rounding) with weights that only ask for energy and
+  // protein (carbs and fat merely pick among the portions that give them). When the centre cannot be reached, its
+  // least-squares projection can lie outside the limits although part of the box is reachable (often only a corner);
+  // one of the moved targets then lands there.
+  const RESOLVE_AIMS = (function () {
+    const out = [[0, 0, LS_WEIGHTS]];
+    [0, -2.5, 2.5, -4.5, 4.5].forEach(function (k) {
+      [0, -5, 5, -9, 9].forEach(function (p) { out.push([k, p, [12, 0.5, 0.5, 2]]); });
+    });
+    return out;
+  })();
+
+  // Whether portions of `vars` within their bounds (continuous) can bring the day (`fixed` = totals without them)
+  // within the kcal and protein limits, fibre to 25 g and (when `fatHeld`) fat to its floor. The reachable
+  // (kcal, protein) pairs form a zonotope; it meets the limit box unless one of the axes or one of the zonotope's
+  // edge normals separates them. A necessary condition for a rounded solution, so a meal that fails it is skipped.
+  function reachable(vars, fixed, T, fatHeld) {
+    const low = fixed.slice(), high = fixed.slice();
+    vars.forEach(function (it) { for (let k = 0; k < 5; k++) { low[k] += it.v[k] * it.lo; high[k] += it.v[k] * it.hi; } });
+    if (high[FI] < FIBRE_MIN_G - 1e-9 || (fatHeld && high[FA] < fatFloor(T) - 1e-9)) return false;
+    const box = [[T.kcal * (1 - KCAL_TOL_PCT / 100), T.protein - PROTEIN_TOL_G], [T.kcal * (1 + KCAL_TOL_PCT / 100), T.protein - PROTEIN_TOL_G],
+      [T.kcal * (1 - KCAL_TOL_PCT / 100), T.protein + PROTEIN_TOL_G], [T.kcal * (1 + KCAL_TOL_PCT / 100), T.protein + PROTEIN_TOL_G]];
+    const gens = vars.map(function (it) { return [it.v[K] * (it.hi - it.lo), it.v[P] * (it.hi - it.lo)]; });
+    const axes = [[1, 0], [0, 1]].concat(gens.map(function (g) { return [-g[1], g[0]]; }));
+    return axes.every(function (a) {
+      if (Math.abs(a[0]) + Math.abs(a[1]) < 1e-12) return true;
+      let zlo = a[0] * low[K] + a[1] * low[P], zhi = zlo, blo = Infinity, bhi = -Infinity;
+      gens.forEach(function (g) { const d = a[0] * g[0] + a[1] * g[1]; if (d < 0) zlo += d; else zhi += d; });
+      box.forEach(function (b) { const d = a[0] * b[0] + a[1] * b[1]; blo = Math.min(blo, d); bhi = Math.max(bhi, d); });
+      const eps = 1e-9 * (1 + Math.abs(blo) + Math.abs(bhi));
+      return zhi >= blo - eps && zlo <= bhi + eps;
+    });
+  }
+
+  // Second stage of repair, for when no one- or two-item move reaches the limits because three or more portions of
+  // one meal have to move together: each meal in turn has its items in `movable` (protein, carb and fat items, and
+  // produce within its bounds) re-solved against what the rest of the day leaves of each target in RESOLVE_AIMS
+  // (bounded least squares). Whole-unit items (eggs, slices) are then fixed one unit below and one above their
+  // solution and the other items re-solved around them; the rest are rounded and every portion within one step of
+  // that rounding is tried. Among the results that meet the kcal, protein and fibre rules without breaking a rule
+  // that held (the fat floor included), the lowest `scorer(totals, mealTotals)` is applied. Returns whether one was
+  // applied; otherwise nothing changes. Deterministic and bounded: per meal and target at most 1 + 2^u solves and
+  // 3^n evaluations (n items, u of them whole-unit).
+  function resolveMeals(meals, movable, T, scorer, offset) {
+    const tot = dayVec(meals), mealT = meals.map(mealVec);
+    const day0 = tot.map(function (x, k) { return x + offset[k]; });
+    const held = limitParts(day0, T).map(function (x) { return x === 0; });
+    let best = null, bestS = Infinity;
+    meals.forEach(function (meal, mi) {
+      const vars = movable.filter(function (ref) { return ref.m === mi; }).map(function (ref) { return meal.items[ref.i]; })
+        .filter(function (it) { return !it.inert && it.hi > it.lo; });
+      if (!vars.some(function (it) { return it.role !== 'produce'; })) return;
+      const n = vars.length;
+      const fixed = day0.slice();
+      vars.forEach(function (it) { for (let k = 0; k < 5; k++) fixed[k] -= it.v[k] * it.grams; });
+      if (!reachable(vars, fixed, T, held[3])) return;
+      const cols = vars.map(function (it) { return [it.v[P] * 100, it.v[C] * 100, it.v[FA] * 100, it.v[K] * 100]; });
+      const units = [];
+      vars.forEach(function (it, j) { if (it.food.unit) units.push(j); });
+      const seen = {}, g = new Array(n);
+      // portions within one step of `centre` (items in `pinned` stay as they are)
+      function around(centre, pinned) {
+        for (let code = 0; code < Math.pow(3, n); code++) {
+          let c = code, ok = true;
+          for (let j = 0; j < n && ok; j++) {
+            const it = vars[j], s = stepOf(it.food), d = c % 3 - 1;
+            c = (c - c % 3) / 3;
+            if (pinned[j] && d !== 0) { ok = false; break; }
+            let v = centre[j] + d * s;
+            if (it.lo === 0 && Math.abs(v) < 1e-9) v = 0;
+            else if (v < Math.max(it.lo, s) - 1e-9 || v > it.hi + 1e-9) ok = false;
+            g[j] = v;
+          }
+          const key = g.join(',');
+          if (!ok || seen[key]) continue;
+          seen[key] = true;
+          const day = fixed.slice();
+          vars.forEach(function (it, j) { for (let k = 0; k < 5; k++) day[k] += it.v[k] * g[j]; });
+          const parts = limitParts(day, T);
+          if (parts[0] + parts[1] + parts[2] > 0 || parts.some(function (p, i) { return held[i] && p > 0; })) continue;
+          const mt = mealT.slice();
+          mt[mi] = mealT[mi].map(function (x, k) { return x + day[k] - day0[k]; });
+          const sc = scorer(day.map(function (x, k) { return x - offset[k]; }), mt);
+          if (sc < bestS - 1e-9) { bestS = sc; best = { items: vars, g: g.slice() }; }
+        }
+      }
+      // bounded least squares for the free items (pin[j] !== undefined: item j fixed at pin[j] grams)
+      function solve(t, w, pin) {
+        const lo = vars.map(function (it, j) { return (pin[j] !== undefined ? pin[j] : it.lo) / 100; });
+        const hi = vars.map(function (it, j) { return (pin[j] !== undefined ? pin[j] : it.hi) / 100; });
+        return boxLeastSquares(cols, t, w, lo, hi);
+      }
+      RESOLVE_AIMS.forEach(function (aim) {
+        const kcal = T.kcal * (1 + aim[0] / 100), protein = T.protein + aim[1];
+        const t = [protein - fixed[P], T.carbs - fixed[C], T.fat - fixed[FA], kcal - fixed[K]];
+        const x = solve(t, aim[2], []);
+        if (!x) return;
+        for (let mask = 0; mask < Math.pow(2, units.length); mask++) {
+          const pin = [], pinned = [];
+          units.forEach(function (j, b) {
+            const it = vars[j], s = stepOf(it.food), q = x[j] * 100 / s;
+            const v = ((mask >> b) & 1 ? Math.ceil(q - 1e-9) : Math.floor(q + 1e-9)) * s;
+            pin[j] = Math.min(it.hi, Math.max(it.lo === 0 && v < s ? 0 : Math.max(it.lo, s), v));
+            pinned[j] = true;
+          });
+          const y = units.length ? solve(t, aim[2], pin) : x;
+          if (!y) continue;
+          around(vars.map(function (it, j) { return pinned[j] ? pin[j] : roundItem(it, y[j] * 100); }), pinned);
+        }
+      });
+    });
+    if (!best) return false;
+    best.items.forEach(function (it, j) { it.grams = best.g[j]; });
+    return true;
   }
 
   // ---------- generation ----------
@@ -735,12 +861,14 @@
     const kcalDiffPct = T.kcal > 0 ? (d.kcal - T.kcal) / T.kcal * 100 : 0;
     const proteinDiffG = d.protein - T.protein;
     const veg = {}, fruit = {}, issues = [];
+    let carbItems = 0, carbsAtMax = 0;
     plan.meals.forEach(function (m) {
       const count = { protein: 0, carb: 0, produce: 0 };
       m.items.forEach(function (it) {
         const f = F[it.foodId];
         if (!f) { issues.push(m.name + ': unknown food "' + it.foodId + '".'); return; }
         if (count[it.role] !== undefined) count[it.role]++;
+        if (it.role === 'carb') { carbItems++; if (it.grams >= maxGrams(f) - 1e-9) carbsAtMax++; }
         if (it.role === 'produce' && f.category === 'vegetable') veg[f.id] = true;
         if (it.role === 'produce' && f.category === 'fruit') fruit[f.id] = true;
         if (it.grams > maxGrams(f) + 1e-9) {
@@ -754,7 +882,9 @@
     const vegCount = Object.keys(veg).length, fruitCount = Object.keys(fruit).length;
     if (Math.abs(kcalDiffPct) > KCAL_TOL_PCT + 1e-9) {
       const kd = Math.max(1, limitDecimals(kcalDiffPct, Math.sign(kcalDiffPct) * KCAL_TOL_PCT));
-      issues.push('Calories ' + fmt(d.kcal) + ' kcal vs target ' + fmt(T.kcal) + ' (' + signed(kcalDiffPct, kd) + ' %, limit ±5 %).');
+      const full = kcalDiffPct < 0 && carbItems > 0 && carbsAtMax === carbItems;
+      issues.push('Calories ' + fmt(d.kcal) + ' kcal vs target ' + fmt(T.kcal) + ' (' + signed(kcalDiffPct, kd) + ' %, limit ±5 %)' +
+        (full ? ': every carb portion is already as large as one meal allows; more meals per day (or regenerating the plan) would make room.' : '.'));
     }
     if (Math.abs(proteinDiffG) > PROTEIN_TOL_G + 1e-9) {
       const pd = limitDecimals(proteinDiffG, Math.sign(proteinDiffG) * PROTEIN_TOL_G);
@@ -780,10 +910,18 @@
   // ---------- rescale ----------
   function sameTargets(a, b) { return a.kcal === b.kcal && a.protein === b.protein && a.fat === b.fat && a.carbs === b.carbs; }
 
+  // Rounds a moved portion to a whole step: to the nearest (`dir` 0), towards the portion it moved from (−1: never
+  // more than the continuous move) or away from it (+1: at least the continuous move).
+  function roundMove(food, g, from, dir) {
+    if (!dir) return roundGrams(food, g);
+    const s = stepOf(food), n = g / s, away = g > from ? 1 : -1;
+    return Math.max(s, (dir * away > 0 ? Math.ceil(n - 1e-9) : Math.floor(n + 1e-9)) * s);
+  }
+
   // Spreads `delta` (kcal or grams of nutrient `key`) over items, each item taking a share proportional to
   // `weight(it)`, within [lo, hi] (water-filling: clamped items drop out and the rest is shared again). Changed
-  // items are rounded. Returns the part of `delta` that could not be placed.
-  function spread(items, delta, key, weight) {
+  // items are rounded (see roundMove for `round`). Returns the part of `delta` that could not be placed.
+  function spread(items, delta, key, weight, round) {
     let left = delta;
     let active = items.filter(function (it) { return it.v[key] > 0; });
     const want = new Map(items.map(function (it) { return [it, it.grams]; }));
@@ -807,7 +945,7 @@
     }
     items.forEach(function (it) {
       const g = want.get(it);
-      if (Math.abs(g - it.grams) > 1e-9) it.grams = Math.min(it.hi, Math.max(it.lo, roundGrams(it.food, g)));
+      if (Math.abs(g - it.grams) > 1e-9) it.grams = Math.min(it.hi, Math.max(it.lo, roundMove(it.food, g, it.grams, round)));
     });
     return left;
   }
@@ -850,58 +988,132 @@
     polish(items, Math.sign(dP), P, target, dayVec(meals)[P], origin);
   }
 
-  // Energy the fat items may add before the day's fat passes FAT_ROOM_PCT above its target.
-  function fatRoomKcal(meals, fats, T) {
+  // Energy the fat items may add before the day's fat passes `cap` grams.
+  function fatRoomKcal(meals, fats, cap) {
     let kcal = 0, fat = 0;
     fats.forEach(function (it) { kcal += it.v[K] * it.grams; fat += it.v[FA] * it.grams; });
-    const room = T.fat * (1 + FAT_ROOM_PCT / 100) - dayVec(meals)[FA];
+    const room = cap - dayVec(meals)[FA];
     return fat > 0 && room > 0 ? room * kcal / fat : 0;
   }
 
-  // Moves the day's energy towards T.kcal through the carb items (in proportion to their carb grams), then the fat
-  // items. An increase the carb items cannot hold goes to fat while the day's fat stays within FAT_ROOM_PCT of its
-  // target; if the day is then still short by more than the aim band, the carb items stretch to CARB_STRETCH × their
-  // maximum (a maintenance break is "added back as carbs"). Fat takes whatever is left.
-  function moveEnergy(meals, carbs, fats, T) {
+  // Single steps up on `items` while the day is short of T.kcal − `band`: each step the one that brings the day
+  // closest to T.kcal (an overshoot only when it ends closer than staying short), never taking an item past its
+  // `hi` nor (when `fatCap` is given) the day's fat past `fatCap`.
+  function stepUp(meals, items, T, band, fatCap) {
+    const day = dayVec(meals);
+    for (let guard = 0; guard < 400 && T.kcal - day[K] > band + 1e-6; guard++) {
+      let best = null, bestErr = Math.abs(T.kcal - day[K]) - 1e-9;
+      items.forEach(function (it) {
+        const s = stepOf(it.food);
+        if (it.grams + s > it.hi + 1e-9) return;
+        if (fatCap !== undefined && day[FA] + it.v[FA] * s > fatCap + 1e-9) return;
+        const e = Math.abs(T.kcal - day[K] - it.v[K] * s);
+        if (e < bestErr) { bestErr = e; best = it; }
+      });
+      if (!best) return;
+      const s = stepOf(best.food);
+      for (let k = 0; k < 5; k++) day[k] += best.v[k] * s;
+      best.grams += s;
+    }
+  }
+
+  // Single steps down on the fat items (never below their portion in the input plan, `base`; largest added fat
+  // first) while the day's fat is above `cap`; true when anything moved.
+  function trimFat(meals, fats, cap, base) {
+    let fat = dayVec(meals)[FA], moved = false;
+    for (let guard = 0; guard < 200 && fat > cap + 1e-9; guard++) {
+      let best = null, bestAdded = 1e-9;
+      fats.forEach(function (it) {
+        const s = stepOf(it.food), added = (it.grams - base.get(it)) * it.v[FA];
+        if (it.grams - s < base.get(it) - 1e-9 || it.grams - s < it.lo - 1e-9) return;
+        if (added > bestAdded) { bestAdded = added; best = it; }
+      });
+      if (!best) break;
+      best.grams -= stepOf(best.food);
+      fat -= best.v[FA] * stepOf(best.food);
+      moved = true;
+    }
+    return moved;
+  }
+
+  // Moves the day's energy towards T.kcal: through the carb items first (in proportion to their carb grams, within
+  // their per-meal maximum), then the fat items (in proportion to their fat grams).
+  //  - decrease: fat items take what the carb items cannot give up;
+  //  - increase the carb items cannot hold: fat items grow while the day's fat stays under `ctx.fatCap` (FAT_HIGH_PCT
+  //    above target: rounded down, then topped up by single steps under the cap, so this never causes the fat
+  //    warning); then, only when `ctx.stretch` (a large increase: a maintenance break is "added back as carbs"), the
+  //    carb items grow up to CARB_STRETCH × their maximum (when the day is still short by more than the aim band).
+  //    Fat the carb foods bring themselves (oats, bread) also counts: fat items step back towards their input portion
+  //    (`ctx.base`) while the cap is exceeded, and the carb items refill. If the day is then still outside the kcal
+  //    limit (−4.5 %: a little room for rounding), fat items take single steps past the cap until it is inside
+  //    (reported by the fat warning). A routine increase therefore never takes a portion past its maximum.
+  function moveEnergy(meals, carbs, fats, T, ctx) {
     const origin = snapshot(carbs.concat(fats));
-    const dK = T.kcal - dayVec(meals)[K];
+    const short = function () { return T.kcal - dayVec(meals)[K]; };
+    const band = T.kcal * KCAL_AIM_PCT / 100;
+    const dK = short();
     const byCarbs = function (it) { return it.grams * it.v[C]; };
     const byFat = function (it) { return it.grams * it.v[FA]; };
-    let left = spread(carbs, dK, K, byCarbs), fatMoved = false;
+    const left = spread(carbs, dK, K, byCarbs);
+    if (dK < 0) {
+      if (left < -1e-6) spread(fats, left, K, byFat);
+      polish(left < -1e-6 ? carbs.concat(fats) : carbs, -1, K, T.kcal, dayVec(meals)[K], origin);
+      return;
+    }
+    if (!(dK > 0)) return;
     if (left > 1e-6) {
-      const room = Math.min(left, fatRoomKcal(meals, fats, T));
-      fatMoved = room > 0;
-      left += spread(fats, room, K, byFat) - room;
-      if (T.kcal - dayVec(meals)[K] > T.kcal * KCAL_AIM_PCT / 100) {
+      const room = Math.min(short(), fatRoomKcal(meals, fats, ctx.fatCap));
+      if (room > 1e-6) {
+        spread(fats, room, K, byFat, -1);
+        stepUp(meals, fats, T, 0, ctx.fatCap);
+      }
+      if (ctx.stretch && short() > band + 1e-6) {
         carbs.forEach(function (it) {
           const s = stepOf(it.food);
           it.hi = Math.max(it.hi, Math.floor(CARB_STRETCH * maxGrams(it.food) / s + 1e-9) * s);
         });
-        left = spread(carbs, left, K, byCarbs);
+        spread(carbs, short(), K, byCarbs);
       }
     }
-    if (Math.abs(left) > 1e-6 && Math.sign(left) === Math.sign(dK)) {
-      spread(fats, left, K, byFat);
-      fatMoved = true;
+    // rounding clean-up (fat items may only step back); fat the carb foods bring (oats, bread) counts against the
+    // cap too: fat items step back towards their input portion while it is exceeded, and the carb items refill
+    const fatHi = fats.map(function (it) { return it.hi; });
+    for (let pass = 0; pass < 4; pass++) {
+      fats.forEach(function (it) { it.hi = Math.min(it.hi, it.grams); });
+      polish(carbs.concat(fats), 1, K, T.kcal, dayVec(meals)[K], origin);
+      fats.forEach(function (it, i) { it.hi = fatHi[i]; });
+      if (!trimFat(meals, fats, ctx.fatCap, ctx.base)) break;
+      spread(carbs, short(), K, byCarbs);
     }
-    polish(fatMoved ? carbs.concat(fats) : carbs, Math.sign(dK), K, T.kcal, dayVec(meals)[K], origin);
+    // past the cap only as far as the published kcal limit needs (with a little room for rounding)
+    const limit = T.kcal * (KCAL_TOL_PCT - 0.5) / 100;
+    if (short() > limit + 1e-6) stepUp(meals, fats, T, limit);
   }
 
-  function rescalePlan(plan, foods, newTargets) {
+  // `opts.allowCarbStretch === false` forbids the carb stretch even for a large increase (e.g. targets that drifted
+  // up by ≥ 300 kcal over several routine check-ins since the plan was generated); it never enables it for a
+  // smaller one.
+  function rescalePlan(plan, foods, newTargets, opts) {
     const F = normalizeMap(foods);
+    const T0 = pickTargets(plan.targets);
     const T1 = pickTargets(newTargets);
     const out = clonePlan(plan);
     out.targets = T1;
-    if (sameTargets(pickTargets(plan.targets), T1)) return { plan: out, changes: [] };
+    if (sameTargets(T0, T1)) return { plan: out, changes: [] };
     const meals = toWorkMeals(plan, F);
     byRole(meals, 'produce').forEach(function (it) { it.lo = it.grams; });   // produce only grows (for fibre)
     const proteins = byRole(meals, 'protein'), carbs = byRole(meals, 'carb'), fats = byRole(meals, 'fat');
+    const energy = {
+      stretch: T1.kcal - T0.kcal >= LARGE_INCREASE_KCAL - 1e-9 && !(opts && opts.allowCarbStretch === false),
+      fatCap: Math.max(T1.fat * (1 + FAT_HIGH_PCT / 100), dayVec(meals)[FA]),
+      base: snapshot(fats)
+    };
 
     // 1. protein items move only when the protein target moved, towards the new target
-    if (pickTargets(plan.targets).protein !== T1.protein) moveProtein(meals, proteins, T1.protein);
+    if (T0.protein !== T1.protein) moveProtein(meals, proteins, T1.protein);
     const proteinTol = Math.max(PROTEIN_AIM_G, Math.abs(T1.protein - dayVec(meals)[P]));
     // 2. energy: carb items first, then fat items
-    moveEnergy(meals, carbs, fats, T1);
+    moveEnergy(meals, carbs, fats, T1, energy);
 
     // 3. carb and fat foods carry protein and fibre too (a maintenance break adds ~25 g of protein through
     //    potatoes, oats, bread…; a cut takes fibre away with them). When protein drifted outside the aim (and
@@ -914,7 +1126,7 @@
       if (!proteinOff && !fibreLow) break;
       if (proteinOff) moveProtein(meals, proteins, T1.protein);
       if (fibreLow) growFibre(meals, null);
-      moveEnergy(meals, carbs, fats, T1);
+      moveEnergy(meals, carbs, fats, T1, energy);
     }
     // 4. a published limit still fails (e.g. carbs at their floor): repair with every item, produce only growing
     const aim = [T1.kcal, T1.protein, T1.carbs, T1.fat];

@@ -446,28 +446,32 @@ mergeUnmatched(existing, incoming) -> list         // de-duplicated by store + b
 * Header on every tab: current phase label, "week X of Y", block end date ("ends Fri 20 Nov, dinner"),
   projected weight at block end, today's targets (kcal / P / C / F), save status.
 * **Setup**: all inputs from §3 (weekday pickers as 7 toggle buttons Sat…Fri or Mon…Sun), Saturday toggle, food
-  picker grouped by category with per-100 g macros, three states per food (Like / — / Won't eat), custom food
-  form, program start date (Saturday). Below: "Starting calculations" panel showing every number with its
-  formula and inputs (BMR, exercise, formula TDEE, LBM, protein, fat floor, fat 22 %, carbs, goal weight, 15 %
-  threshold weight, weekly rate, deficit, starting target, BMR floor). Phase timeline (blocks with dates).
-  Backup export/import buttons.
+  picker grouped by category with per-100 g macros, three states per food (Like / Neutral / Won't eat), custom
+  food form, program start date (Saturday). Below: "Starting calculations" panel with the week-1 targets (kcal,
+  protein, carbs, fat) and the numbers behind them (BMR, TDEE, training, deficit, rate, lean mass, goal weight,
+  15 % threshold weight) as plain values; formulas are not shown, only a collapsed plain-language "How these are
+  worked out" list. Phase timeline (blocks with dates). Backup export/import buttons.
 * **Daily Log**: quick-entry row (date defaults to today; weight, kcal, protein, steps; Enter saves), table of
   the current and previous diet weeks with targets vs eaten, edit/delete per row. On Saturdays with
   saturdayMode 'offplan': show the budget left for the off-plan breakfast + lunch = day target − planned kcal
   and protein of the meals after lunch.
 * **Weekly Check-in**: due banner (Friday), this vs previous week table (7-day averages, days logged, steps),
-  observed / learned / formula TDEE with formulas, target vs actual loss, stall diagnosis flags, proposed new
+  observed / learned / starting TDEE as values (no formulas), actual vs target loss, stall diagnosis flags, proposed new
   targets vs current, "Save check-in" (overwrites the same week), history table, SVG chart: daily weights
   (dots), rolling 7-day average (line), target line (dashed), goal weight (thin line).
 * **Meal Plan**: week selector (this week / next week from Saturday dinner), Generate button (confirm inline
   when a plan exists), meals table with grams (and units, e.g. "2 eggs (110 g)"), macros per meal and per day
   vs targets, check results (kcal %, protein g, fibre, veg/fruit counts), Swap per item (select of candidates),
   "changes vs last week" list.
-* **Groceries**: window "Sat 3 Oct dinner → Fri 9 Oct dinner", weekly quantities, per-store tables (product,
-  EAN, pack, price, price date, packs, cost, leftover, stale flag "run price script"), totals per store, cheapest
+* **Groceries**: window "Sat 3 Oct dinner to Fri 9 Oct dinner", weekly quantities, per-store tables (product with
+  EAN, packs × pack size, price with its date, cost, leftover, stale flag "run price script"), totals per store, cheapest
   mix, "Export grocery list", "Import prices" (file input), last import date, unmatched rows with a food select
   to map them, editable product table (add/edit/delete rows, reset to seed).
 * No `alert/confirm/prompt` (they are blocked in the artifact viewer): inline confirmations.
+* Visual style: Geist / Geist Mono, warm neutral palette with one accent (blue) and pastel status chips, light and
+  dark themes, 8/12 px radii, hairline borders instead of shadows. Visible text uses no en or em dashes (week
+  ranges read "Sat 26 Sep to Fri 2 Oct"; empty values show "-"); the engine's worked explanations and check-in notes
+  are kept in the data but not displayed.
 * Rendering patches the live DOM in place (a small morph) so focus, half-typed dates and the clicked button survive a
   re-render; date fields apply on blur or Enter.
 * The week before the program start is a baseline on the Check-in tab (week-1 targets come from Setup).

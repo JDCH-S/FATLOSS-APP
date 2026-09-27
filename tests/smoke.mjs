@@ -36,12 +36,16 @@ async function tab(name) {
   await page.waitForTimeout(80);
   const broken = await page.locator('text=Something went wrong').count();
   check(`tab ${name} renders without error`, broken === 0);
+  const text = await page.evaluate(() => document.body.innerText);
+  check(`tab ${name} shows no en or em dashes`, !/[\u2013\u2014]/.test(text), (text.match(/.{0,30}[\u2013\u2014].{0,30}/) || [])[0]);
+  check(`tab ${name} shows no formula columns`, (await page.locator('td.formula').count()) === 0);
   await page.screenshot({ path: join(out, `${name}.png`), fullPage: true });
 }
 
 // ---- Setup
 await tab('setup');
-check('starting calculations table', await page.locator('text=BMR (Mifflin-St Jeor, men)').count() > 0);
+check('starting calculations shown', await page.locator('#calc-bmr').count() > 0);
+check('header has no formula list', await page.locator('#status-strip details').count() === 0);
 // First edit on example data removes the example banner (the page shifts); a slow click right after must still land.
 await page.fill('#s-age', '36');
 const thu = await page.locator('#day-liftDays-4').boundingBox();
@@ -54,11 +58,11 @@ check('slow click right after the first edit lands', (await page.getAttribute('#
 await page.click('#day-liftDays-4');
 await page.fill('#s-age', '35');
 await page.press('#s-age', 'Tab');
-const bmrBefore = await page.locator('td:has-text("BMR (Mifflin-St Jeor, men)") + td').textContent();
+const bmrBefore = await page.locator('#calc-bmr').textContent();
 await page.fill('#s-weight', '90');
 await page.press('#s-weight', 'Tab');
 await page.waitForTimeout(120);
-const bmrAfter = await page.locator('td:has-text("BMR (Mifflin-St Jeor, men)") + td').textContent();
+const bmrAfter = await page.locator('#calc-bmr').textContent();
 check('BMR updates when weight changes', bmrBefore !== bmrAfter, `${bmrBefore} -> ${bmrAfter}`);
 check('focus moved to next field after Tab', await page.evaluate(() => document.activeElement && document.activeElement.id) === 's-height');
 await page.fill('#s-weight', '85');
@@ -170,7 +174,7 @@ await page.fill('#s-weight', '80');
 await page.press('#s-weight', 'Tab');
 await page.waitForTimeout(150);
 const protAfter = await page.locator('#status-strip').textContent();
-const pOf = (t) => (t.match(/P (\d+)/) || [])[1];
+const pOf = (t) => (t.match(/Protein (\d+)/) || [])[1];
 check('protein target unchanged after lowering Setup weight', pOf(protBefore) === pOf(protAfter), pOf(protBefore) + ' vs ' + pOf(protAfter));
 await page.fill('#s-weight', '85');
 await page.press('#s-weight', 'Tab');
@@ -247,7 +251,7 @@ await page.click('#tab-checkin');
 await page.waitForTimeout(80);
 await page.screenshot({ path: join(out, 'dark-checkin.png'), fullPage: false });
 const bg = await page.evaluate(() => getComputedStyle(document.body).backgroundColor);
-check('dark theme background applied', bg === 'rgb(15, 18, 21)', bg);
+check('dark theme background applied', bg === 'rgb(17, 17, 16)', bg);
 
 await browser.close();
 errors.forEach((e) => console.log('ERROR', e));

@@ -589,7 +589,7 @@
     liftDays: 'weekdays', padelDays: 'weekdays', likedFoods: 'ids', excludedFoods: 'ids', customFoods: 'objects',
     goalType: ['bf', 'weight'], saturdayMode: ['offplan', 'included'], programStart: 'date'
   };
-  const RULE_TEXT = { number: 'a number', 'number?': 'a number or empty', boolean: 'true or false', weekdays: 'a list of weekday numbers 0–6',
+  const RULE_TEXT = { number: 'a number', 'number?': 'a number or empty', boolean: 'true or false', weekdays: 'a list of weekday numbers 0 to 6',
     ids: 'a list of food ids', objects: 'a list of foods', date: 'a date (YYYY-MM-DD)' };
   const LOG_NUMBERS = ['weight', 'kcal', 'protein', 'steps'];
 

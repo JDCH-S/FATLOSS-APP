@@ -42,7 +42,8 @@ docs/SPEC.md         module contract and algorithms
 
 ## How the numbers are made
 
-Every number in the app shows its formula and inputs (Setup → Starting calculations, and the check-in).
+The app shows the numbers, not the arithmetic. Setup → Starting calculations has a collapsed "How these are worked
+out" list in plain words; the exact rules are here:
 
 | Step | Rule |
 |---|---|

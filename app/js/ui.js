@@ -12,7 +12,8 @@
   const DAY_SHORT = ['Sun', 'Mon', 'Tue', 'Wed', 'Thu', 'Fri', 'Sat'];
   const CAT_ORDER = ['protein', 'dairy', 'carb', 'vegetable', 'fruit', 'fat'];
   const CAT_LABEL = { protein: 'Protein', dairy: 'Dairy', carb: 'Carbs', vegetable: 'Vegetables', fruit: 'Fruit', fat: 'Fats' };
-  const ROLE_LABEL = { protein: 'Protein', carb: 'Carb', produce: 'Veg / fruit', fat: 'Fat' };
+  const ROLE_LABEL = { protein: 'Protein', carb: 'Carb', produce: 'Veg or fruit', fat: 'Fat' };
+  const DIAG_LABEL = { neat: 'NEAT drop', tracking: 'Tracking gap', adaptation: 'Metabolic adaptation' };
   const RANGES = {
     weightKg: [30, 300, 'Weight', 'kg'], heightCm: [120, 230, 'Height', 'cm'], age: [14, 100, 'Age', 'years'],
     bodyFatPct: [3, 60, 'Body fat', '%'], goalBodyFatPct: [3, 40, 'Goal body fat', '%'], goalWeightKg: [30, 300, 'Goal weight', 'kg'],
@@ -43,15 +44,15 @@
   }
   function isNum(n) { return typeof n === 'number' && isFinite(n); }
   function fmt(n, d) {
-    if (!isNum(n)) return '–';
+    if (!isNum(n)) return '-';
     return n.toLocaleString('en-GB', { minimumFractionDigits: d || 0, maximumFractionDigits: d || 0 });
   }
   function signed(n, d) {
-    if (!isNum(n)) return '–';
+    if (!isNum(n)) return '-';
     const r = Number(n.toFixed(d || 0));
     return (r > 0 ? '+' : r < 0 ? '−' : '±') + fmt(Math.abs(r), d);
   }
-  function eur(n) { return isNum(n) ? '€' + n.toFixed(2) : '–'; }
+  function eur(n) { return isNum(n) ? '€' + n.toFixed(2) : '-'; }
   function pad(n) { return String(n).padStart(2, '0'); }
   function todayIso() { const d = new Date(); return d.getFullYear() + '-' + pad(d.getMonth() + 1) + '-' + pad(d.getDate()); }
   function val(x) { return x && typeof x === 'object' && 'value' in x ? x.value : x; }
@@ -62,8 +63,9 @@
     return isFinite(n) ? n : NaN;
   }
   function macros(T) { return { kcal: T.kcal, protein: T.protein, fat: T.fat, carbs: T.carbs }; }
-  function dateLong(iso) { return iso ? E.formatDate(iso) + ' ' + iso.slice(0, 4) : '–'; }
-  function formulaText(x) { return x && x.formula ? x.formula : ''; }
+  function dateLong(iso) { return iso ? E.formatDate(iso) + ' ' + iso.slice(0, 4) : '-'; }
+  // A Saturday-to-Friday week as shown in the UI.
+  function range(ws) { return E.formatDate(ws) + ' to ' + E.formatDate(E.addDays(ws, 6)); }
 
   function defaultState() {
     const today = todayIso();
@@ -326,31 +328,28 @@
     const sum = E.programSummary(state, c.today) || {};
     const ph = sum.phase || {};
     const T = sum.targets || {};
-    const parts = [];
+    const phase = [];
     if (ph.type === 'pre') {
       const first = E.phaseForWeek(state.setup.programStart, state.setup.programStart, E.goalReachedWeek(state));
-      parts.push('<span class="chip">Not started</span>');
-      parts.push('<span><b>' + esc(first.label) + '</b> starts ' + esc(E.formatDate(state.setup.programStart)) + ' (dinner)</span>');
-      if (first.blockEnd) parts.push('<span>Week 1 of ' + first.blockLength + ', ends <b>' + esc(E.formatDate(first.blockEnd)) + '</b>, dinner</span>');
+      phase.push('<span class="chip">Not started</span>');
+      phase.push('<span><b>' + esc(first.label) + '</b> starts ' + esc(E.formatDate(state.setup.programStart)) + ' at dinner</span>');
+      if (first.blockEnd) phase.push('<span class="muted">' + first.blockLength + ' weeks, ends ' + esc(E.formatDate(first.blockEnd)) + '</span>');
     } else {
       const cls = ph.type === 'cut' ? 'accent' : 'good';
-      parts.push('<span class="chip ' + cls + '">' + esc(ph.label || '') + '</span>');
-      parts.push('<span>Week <b>' + ph.weekInBlock + '</b>' + (ph.blockLength ? ' of ' + ph.blockLength : '') + '</span>');
-      if (ph.blockEnd) parts.push('<span>Block ends <b>' + esc(E.formatDate(ph.blockEnd)) + '</b>, dinner</span>');
+      phase.push('<span class="chip ' + cls + '">' + esc(ph.label || '') + '</span>');
+      phase.push('<span>Week <b>' + ph.weekInBlock + '</b>' + (ph.blockLength ? ' of ' + ph.blockLength : '') + '</span>');
+      if (ph.blockEnd) phase.push('<span class="muted">Ends ' + esc(E.formatDate(ph.blockEnd)) + ' at dinner</span>');
     }
+    const nums = [
+      headStat(ph.type === 'pre' ? 'Week 1' : 'Today', fmt(T.kcal), 'kcal'), headStat('Protein', fmt(T.protein), 'g'),
+      headStat('Carbs', fmt(T.carbs), 'g'), headStat('Fat', fmt(T.fat), 'g')
+    ];
     if (sum.projection && isNum(sum.projection.weightKg)) {
-      const label = sum.projection.weightLabel || (ph.type === 'final' ? 'Holding at' : 'Projected at block end');
-      parts.push('<span>' + esc(label) + ' <b>' + fmt(sum.projection.weightKg, 1) + ' kg</b>' + (ph.type === 'final' ? ' (no block end)' : '') + '</span>');
+      nums.push(headStat(sum.projection.weightLabel || (ph.type === 'final' ? 'Holding at' : 'Projected at block end'), fmt(sum.projection.weightKg, 1), 'kg'));
     }
-    parts.push('<span>' + (ph.type === 'pre' ? 'Week-1 targets' : 'Today') + ' <b>' + fmt(T.kcal) + ' kcal</b> · P ' + fmt(T.protein) +
-      ' · C ' + fmt(T.carbs) + ' · F ' + fmt(T.fat) + ' g</span>');
-    const how = (sum.explanation || []).concat(T.explanation || [], (sum.projection && sum.projection.explanation) || []);
-    if (how.length) {
-      parts.push('<details class="how" id="hdr-how"' + (ui.open['hdr-how'] ? ' open' : '') + '><summary>How are these worked out?</summary><ul class="note">' +
-        how.map(function (l) { return '<li>' + esc(l) + '</li>'; }).join('') + '</ul></details>');
-    }
-    patch(strip, parts.join(''));
+    patch(strip, '<div class="st-group" id="st-phase">' + phase.join('') + '</div><div class="st-group" id="st-nums">' + nums.join('') + '</div>');
   }
+  function headStat(k, v, unit) { return '<span class="st"><span class="k">' + esc(k) + '</span> <b>' + v + '</b> ' + unit + '</span>'; }
 
   // ---------- small builders ----------
   // Every top-level block and message area carries a stable id so the in-place patch never pairs a block with
@@ -387,6 +386,15 @@
     if (!m) return '';
     return '<div class="banner ' + (m.kind || 'info') + '" role="status">' + esc(m.text) + '</div>';
   }
+  // A labelled number: label, value with a small unit, optional caption. Values are pre-formatted.
+  function stat(label, value, unit, sub, id) {
+    return '<div class="stat"><span class="k">' + esc(label) + '</span><span class="v"' + (id ? ' id="' + id + '"' : '') + '>' + value +
+      (unit ? '<small>' + esc(unit) + '</small>' : '') + '</span>' + (sub ? '<span class="d">' + sub + '</span>' : '') + '</div>';
+  }
+  function setting(label, control, note, forId) {
+    return '<div class="setting">' + (forId ? '<label class="label" for="' + forId + '">' + esc(label) + '</label>' : '<span class="label">' + esc(label) + '</span>') +
+      control + (note ? '<p class="note">' + note + '</p>' : '') + '</div>';
+  }
 
   // =====================================================================================
   // SETUP
@@ -398,35 +406,31 @@
       (ui.setupErr ? '<div class="banner bad" role="alert">' + esc(ui.setupErr) + '</div>' : '') +
       (ui.setupNote ? '<div class="banner info" role="status">' + esc(ui.setupNote) + '</div>' : '')));
 
-    h.push(block('Body', '<div class="panel stack"><div class="grid">' +
+    h.push(block('Body', '<div class="panel"><div class="grid">' +
       numInput('s-weight', 'Weight (kg)', s.weightKg, 'weightKg', 0.1) +
       numInput('s-height', 'Height (cm)', s.heightCm, 'heightCm', 1) +
       numInput('s-age', 'Age (years)', s.age, 'age', 1) +
-      numInput('s-bf', 'Estimated body fat % (optional)', s.bodyFatPct, 'bodyFatPct', 0.5) +
-      '</div><div class="row"><span class="label">Goal</span>' +
-      seg('goalType', s.goalType, [['bf', 'Body fat %'], ['weight', 'Weight']]) +
-      '<div style="width:170px">' + (s.goalType === 'bf'
+      numInput('s-bf', 'Body fat % (optional)', s.bodyFatPct, 'bodyFatPct', 0.5) +
+      '<div class="field"><span>Goal</span>' + seg('goalType', s.goalType, [['bf', 'Body fat %'], ['weight', 'Weight']]) + '</div>' +
+      (s.goalType === 'bf'
         ? numInput('s-goalbf', 'Goal body fat %', s.goalBodyFatPct, 'goalBodyFatPct', 0.5)
-        : numInput('s-goalkg', 'Goal weight (kg)', s.goalWeightKg, 'goalWeightKg', 0.1)) + '</div></div></div>'));
+        : numInput('s-goalkg', 'Goal weight (kg)', s.goalWeightKg, 'goalWeightKg', 0.1)) + '</div></div>'));
 
-    h.push(block('Training and activity', '<div class="panel stack">' +
-      '<div class="grid">' + numInput('s-steps', 'Typical daily steps', s.steps, 'steps', 100) +
+    h.push(block('Training and activity', '<div class="panel stack-lg">' +
+      '<div class="grid">' + numInput('s-steps', 'Daily steps', s.steps, 'steps', 100) +
       numInput('s-liftmin', 'Lifting session (min)', s.liftMinutes, 'liftMinutes', 5) +
       numInput('s-padelmin', 'Padel session (min)', s.padelMinutes, 'padelMinutes', 5) + '</div>' +
-      '<div class="stack"><span class="label">Lifting days</span>' + dayPicker('liftDays', s.liftDays || []) + '</div>' +
-      '<div class="stack"><span class="label">Padel days</span>' + dayPicker('padelDays', s.padelDays || []) + '</div></div>'));
+      '<div class="settings">' + setting('Lifting days', dayPicker('liftDays', s.liftDays || [])) +
+      setting('Padel days', dayPicker('padelDays', s.padelDays || [])) + '</div></div>'));
 
     const satText = s.saturdayMode === 'offplan'
-      ? 'Off-plan: Saturday breakfast and lunch are not on the grocery list. Log them yourself; they count against Saturday’s targets.'
-      : 'Included: Saturday breakfast and lunch come from the meal plan and are on the grocery list.';
-    h.push(block('Plan settings', '<div class="panel stack">' +
-      '<div class="row"><span class="label" style="min-width:120px">Meals per day</span>' +
-      seg('mealsPerDay', s.mealsPerDay, [[3, '3'], [4, '4'], [5, '5']]) + '</div>' +
-      '<div class="row"><span class="label" style="min-width:120px">Saturday breakfast &amp; lunch</span>' +
-      seg('saturdayMode', s.saturdayMode, [['offplan', 'Off-plan'], ['included', 'Included']]) + '</div>' +
-      '<p class="note">' + esc(satText) + '</p>' +
-      '<div class="row"><label class="field" for="s-start" style="max-width:220px">Program start (a Saturday; first diet week starts at dinner)' +
-      '<input type="date" id="s-start" value="' + esc(s.programStart) + '"></label></div></div>'));
+      ? 'Saturday breakfast and lunch are yours to choose and stay off the grocery list. Log them; they count toward Saturday’s targets.'
+      : 'Saturday breakfast and lunch come from the meal plan and are on the grocery list.';
+    h.push(block('Plan settings', '<div class="panel settings">' +
+      setting('Meals per day', seg('mealsPerDay', s.mealsPerDay, [[3, '3'], [4, '4'], [5, '5']])) +
+      setting('Saturday breakfast and lunch', seg('saturdayMode', s.saturdayMode, [['offplan', 'Off-plan'], ['included', 'Included']]), esc(satText)) +
+      setting('Program start', '<input type="date" id="s-start" value="' + esc(s.programStart) + '" style="max-width:200px">',
+        'Always a Saturday. The first diet week starts at dinner.', 's-start') + '</div>'));
 
     h.push(renderCalculations(c));
     h.push(renderTimeline(c));
@@ -437,47 +441,45 @@
 
   function renderCalculations(c) {
     const s = state.setup;
-    const bmr = E.calcBMR(s);
-    const ex = E.calcExercise(s);
-    const tdee = E.calcFormulaTDEE(s);
-    const lbm = E.calcLeanMass(s);
-    const prot = E.calcProtein(s);
-    const ff = E.calcFatFloor(s.weightKg);
+    const bmr = val(E.calcBMR(s));
+    const ex = val(E.calcExercise(s));
+    const tdee = val(E.calcFormulaTDEE(s));
+    const lbm = val(E.calcLeanMass(s));
     const goal = E.calcGoalWeight(s);
-    const thr = E.calcThresholdWeight(s);
-    const rate = E.weeklyRate(s, s.weightKg);
-    const def = E.dailyDeficit(val(rate), s.weightKg);
+    const thr = val(E.calcThresholdWeight(s));
+    const rate = val(E.weeklyRate(s, s.weightKg));
+    const def = val(E.dailyDeficit(rate, s.weightKg));
     const w1 = E.targetsForWeek(state, s.programStart);
-    const fat22 = 0.22 * w1.kcal / 9;
-    const w1kg = isNum(w1.weightUsed) ? w1.weightUsed : s.weightKg;
+    const targets = '<div class="stack"><span class="label">Week 1, per day</span><div class="stats">' +
+      stat('Calories', fmt(w1.kcal), 'kcal', null, 'calc-kcal') + stat('Protein', fmt(w1.protein), 'g', null, 'calc-protein') +
+      stat('Carbs', fmt(w1.carbs), 'g', null, 'calc-carbs') + stat('Fat', fmt(w1.fat), 'g', null, 'calc-fat') + '</div></div>';
     const rows = [
-      ['BMR (Mifflin-St Jeor, men)', fmt(val(bmr)) + ' kcal', formulaText(bmr)],
-      ['Exercise (average per day)', fmt(val(ex), 0) + ' kcal', formulaText(ex)],
-      ['Starting TDEE (formula)', fmt(val(tdee)) + ' kcal', formulaText(tdee)],
-      ['Lean mass', isNum(val(lbm)) ? fmt(val(lbm), 1) + ' kg' : 'no BF% given', formulaText(lbm)],
-      ['Protein', fmt(val(prot)) + ' g', formulaText(prot)],
-      ['Fat floor', fmt(val(ff)) + ' g', formulaText(ff)],
-      ['Goal weight', fmt(val(goal), 1) + ' kg' + (goal && goal.estimated ? ' (estimated)' : ''), formulaText(goal)],
-      ['15 % body-fat weight', isNum(val(thr)) ? fmt(val(thr), 1) + ' kg' : '–', formulaText(thr)],
-      ['Weekly loss rate (cut)', fmt(val(rate) * 100, 2) + ' % / week', (rate && rate.reason) || ''],
-      ['Daily deficit (cut)', fmt(val(def)) + ' kcal', formulaText(def)],
-      ['Week-1 calorie target', fmt(w1.kcal) + ' kcal', (w1.explanation || []).join(' · ')],
-      ['Week-1 fat', fmt(w1.fat) + ' g', 'Fat = max(22 % × ' + fmt(w1.kcal) + ' kcal / 9, 0.6 g × ' + fmt(w1kg, 1) + ' kg) = max(' +
-        fmt(fat22, 1) + ', ' + fmt(0.6 * w1kg, 1) + ') = ' + fmt(w1.fat, 1) + ' g'],
-      ['Week-1 carbs', fmt(w1.carbs) + ' g', 'Carbs = (' + fmt(w1.kcal) + ' − 4 × ' + fmt(w1.protein, 1) + ' − 9 × ' + fmt(w1.fat, 1) + ') / 4 = ' + fmt(w1.carbs, 1) + ' g'],
-      ['Calorie floor', fmt(val(bmr)) + ' kcal', 'Targets never go below BMR' + (w1.bmrFloorApplied ? ' (applied to week 1)' : '') + '. Protein is never reduced.']
+      ['BMR', fmt(bmr) + ' kcal', 'calc-bmr'],
+      ['Maintenance (TDEE)', fmt(tdee) + ' kcal', 'calc-tdee'],
+      ['Training, daily average', fmt(ex) + ' kcal'],
+      ['Cut deficit, per day', fmt(def) + ' kcal'],
+      ['Cut rate', fmt(rate * 100, 2) + ' % a week'],
+      ['Lean mass', isNum(lbm) ? fmt(lbm, 1) + ' kg' : 'needs body fat %'],
+      ['Goal weight', fmt(val(goal), 1) + ' kg' + (goal && goal.estimated ? ' (estimated)' : '')],
+      ['Weight at 15 % body fat', isNum(thr) ? fmt(thr, 1) + ' kg' : '-']
     ];
-    const body = '<div class="tscroll"><table><thead><tr><th>Number</th><th class="n">Value</th><th>Formula and inputs</th></tr></thead><tbody>' +
-      rows.map(function (r) {
-        return '<tr><td>' + esc(r[0]) + '</td><td class="n"><b>' + esc(r[1]) + '</b></td><td class="formula">' + esc(r[2]) + '</td></tr>';
-      }).join('') + '</tbody></table></div>' +
-      '<p class="note">Weeks 1–2 use this formula TDEE. From week 3 the weekly check-in uses your learned TDEE instead (see Weekly Check-in).</p>' +
-      (state.program && state.program.snapshot && state.program.snapshot.programStart === s.programStart
-        ? '<p class="note">Week-1 targets were fixed on ' + esc(dateLong(state.program.snapshot.takenOn)) + ', ' + esc(state.program.snapshot.reason || 'when the program started') +
-          ', so Setup changes no longer rewrite past weeks. ' +
-          'They take effect through the next check-in, and protein never drops below ' + fmt(state.program.snapshot.week1.protein) + ' g. To restart the program with new numbers, change the program start.</p>'
-        : '');
-    return block('Starting calculations', body);
+    const list = '<div class="dl">' + rows.map(function (r) {
+      return '<div><span>' + esc(r[0]) + '</span><b' + (r[2] ? ' id="' + r[2] + '"' : '') + '>' + esc(r[1]) + '</b></div>';
+    }).join('') + '</div>';
+    const method = '<details class="how" id="calc-how"' + (ui.open['calc-how'] ? ' open' : '') + '><summary>How these are worked out</summary><ul class="note">' +
+      '<li>BMR uses the Mifflin-St Jeor equation. Maintenance adds your steps and training to it.</li>' +
+      '<li>From week 3 the weekly check-in replaces that estimate with the maintenance your own logs show.</li>' +
+      '<li>Protein is 2.7 g per kg of lean mass (2.2 g per kg of bodyweight without a body-fat estimate) and is never lowered.</li>' +
+      '<li>Fat is 22 % of calories and at least 0.6 g per kg. Carbs fill the rest.</li>' +
+      '<li>A cut aims for 1 % of bodyweight a week, 0.75 % once you are below 15 % body fat. Calories never go below your BMR' +
+      (w1.bmrFloorApplied ? ', which is what holds week 1 up' : '') + '.</li>' +
+      '<li>Week-to-week changes inside a phase are capped at 200 kcal.</li></ul></details>';
+    const snap = state.program && state.program.snapshot && state.program.snapshot.programStart === s.programStart ? state.program.snapshot : null;
+    const locked = snap
+      ? '<p class="note">Week-1 targets were locked on ' + esc(dateLong(snap.takenOn)) + ', ' + esc(snap.reason || 'when the program started') +
+        '. Setup changes now apply through the next check-in, and protein stays at ' + fmt(snap.week1.protein) + ' g or more. To start over with new numbers, change the program start.</p>'
+      : '';
+    return block('Starting calculations', '<div class="panel stack-lg">' + targets + list + method + '</div>' + locked);
   }
 
   function renderTimeline(c) {
@@ -526,15 +528,15 @@
       const to = b.goalEnd && isNum(goal) ? goal : b.end ? kgAt[E.addDays(b.end, 1)] : null;
       const dates = b.type === 'final'
         ? 'from ' + E.formatDate(b.start) + (b.projected ? ' (projected)' : '')
-        : E.formatDate(b.start) + ' – ' + E.formatDate(b.end) + ' · ' + b.length + ' wk' +
+        : E.formatDate(b.start) + ' to ' + E.formatDate(b.end) + ', ' + b.length + ' weeks' +
           (b.goalEnd === 'actual' ? ' (goal reached)' : b.goalEnd ? ' (goal reached, projected)' : '');
       const kg = b.type === 'final' ? (isNum(goal) ? 'goal ' + fmt(goal, 1) + ' kg' : '')
         : isNum(from) && isNum(to) ? fmt(from, 1) + ' → ' + fmt(to, 1) + ' kg' : '';
-      return '<div class="t' + (now ? ' now' : '') + '"><span><b>' + esc(b.label) + '</b>' + (now ? ' <span class="chip accent">now</span>' : '') +
+      return '<div class="t' + (now ? ' now' : '') + '"><span><b>' + esc(b.label) + '</b>' + (now ? ' <span class="chip accent">Now</span>' : '') +
         '</span><span class="muted">' + esc(dates) + '</span><span class="num">' + esc(kg) + '</span></div>';
     }).join('');
-    const note = '<p class="note">Cut blocks are 8 weeks, maintenance breaks 2 weeks and not skippable. Weights are the planned path ' +
-      '(1.0 %/week above the 15 % body-fat weight, 0.75 %/week below it); the real path comes from your check-ins.</p>';
+    const note = '<p class="note">Each cut lasts 8 weeks and is followed by a 2-week maintenance break that can’t be skipped. ' +
+      'Weights show the planned path; your check-ins set the real one.</p>';
     return block('Program timeline', '<div class="panel timeline">' + rows + '</div>' + note);
   }
 
@@ -551,15 +553,15 @@
       return '<tr class="sub"><td colspan="7">' + CAT_LABEL[cat] + '</td></tr>' + items.map(function (f) {
         const pref = excluded.indexOf(f.id) >= 0 ? 'exclude' : liked.indexOf(f.id) >= 0 ? 'like' : 'neutral';
         const tri = '<div class="seg tri" role="group" aria-label="Preference for ' + esc(f.name) + '">' +
-          [['like', 'Like'], ['neutral', '–'], ['exclude', 'Won’t eat']].map(function (o) {
+          [['like', 'Like'], ['neutral', 'Neutral'], ['exclude', 'Won’t eat']].map(function (o) {
             return '<button type="button" id="pref-' + esc(f.id) + '-' + o[0] + '" data-action="food-pref" data-food="' + esc(f.id) +
               '" data-v="' + o[0] + '" aria-pressed="' + String(pref === o[0]) + '">' + o[1] + '</button>';
           }).join('') + '</div>';
         const del = f.custom ? ' <button type="button" class="btn ghost" id="delcustom-' + esc(f.id) + '" data-action="delete-custom" data-food="' +
           esc(f.id) + '">Delete</button>' : '';
-        return '<tr><td>' + esc(f.name) + (f.custom ? ' <span class="chip">custom</span>' : '') + '<span class="sub">' + esc(f.nameNl || '') +
-          (f.unit ? ' · 1 ' + esc(f.unit.name) + ' = ' + fmt(f.unit.grams) + ' g' : '') + '</span>' +
-          '<span class="sub show-sm">' + fmt(f.kcal) + ' kcal · P ' + fmt(f.protein, 1) + ' · C ' + fmt(f.carbs, 1) + ' · F ' + fmt(f.fat, 1) + ' · fibre ' + fmt(f.fibre, 1) + '</span>' + del +
+        const sub = [f.nameNl, f.unit ? '1 ' + f.unit.name + ' = ' + fmt(f.unit.grams) + ' g' : ''].filter(Boolean).join(', ');
+        return '<tr><td>' + esc(f.name) + (f.custom ? ' <span class="chip">Custom</span>' : '') + (sub ? '<span class="sub">' + esc(sub) + '</span>' : '') +
+          '<span class="sub show-sm">' + fmt(f.kcal) + ' kcal, P ' + fmt(f.protein, 1) + ', C ' + fmt(f.carbs, 1) + ', F ' + fmt(f.fat, 1) + ', fibre ' + fmt(f.fibre, 1) + '</span>' + del +
           confirmBar('deleteCustom', f.id, 'Delete this custom food? It is removed from your liked foods and replaced in the meal plan.', 'Delete') +
           (ui.rowErr && ui.rowErr.id === f.id ? '<div class="banner bad" role="alert">' + esc(ui.rowErr.text) + '</div>' : '') +
           '</td><td class="n hide-sm">' + fmt(f.kcal) + '</td><td class="n hide-sm">' + fmt(f.protein, 1) + '</td><td class="n hide-sm">' + fmt(f.carbs, 1) +
@@ -569,11 +571,11 @@
     const likedCount = c.liked.length;
     const table = '<div class="tscroll"><table><thead><tr><th>Food (per 100 g)</th><th class="n hide-sm">kcal</th><th class="n hide-sm">Protein</th>' +
       '<th class="n hide-sm">Carbs</th><th class="n hide-sm">Fat</th><th class="n hide-sm">Fibre</th><th>Preference</th></tr></thead><tbody>' +
-      (groups || '<tr><td colspan="7" class="muted">No food matches “' + esc(ui.foodFilter) + '”.</td></tr>') + '</tbody></table></div>';
+      (groups || '<tr><td colspan="7" class="muted">No food matches “' + esc(ui.foodFilter) + '”. Try a shorter word, or add it as a custom food below.</td></tr>') + '</tbody></table></div>';
 
     const cf = ui.custom;
-    const customForm = '<details class="panel" id="cf-details"' + (ui.open['cf-details'] || ui.customErr ? ' open' : '') + '><summary><b>Add a custom food</b> <span class="muted small">(macros per 100 g)</span></summary>' +
-      '<div class="stack" style="margin-top:10px">' +
+    const customForm = '<details class="panel" id="cf-details"' + (ui.open['cf-details'] || ui.customErr ? ' open' : '') + '><summary><b>Add a custom food</b> <span class="muted small">Macros per 100 g</span></summary>' +
+      '<div class="stack">' +
       '<div class="grid">' +
       customField('cf-name', 'Name', 'name', 'text') +
       '<label class="field" for="cf-category">Category<select id="cf-category" data-custom="category">' + CAT_ORDER.map(function (k) {
@@ -590,8 +592,8 @@
       '<div class="row"><button type="button" class="btn primary" id="cf-add" data-action="add-custom">Add food</button>' +
       '<span class="muted small">New custom foods are marked as liked.</span></div></div></details>';
 
-    const aside = '<span class="muted small">' + likedCount + ' liked · ' + (s.excludedFoods || []).length + ' excluded</span>';
-    return block('Foods', '<p class="note">Pick the foods you like. The meal plan uses liked foods only; foods you won’t eat are excluded everywhere (plan, swaps, groceries).</p>' +
+    const aside = '<span class="muted small">' + likedCount + ' liked, ' + (s.excludedFoods || []).length + ' won’t eat</span>';
+    return block('Foods', '<p class="note">The meal plan only uses foods you like. Foods you won’t eat are left out everywhere: plan, swaps and groceries.</p>' +
       '<div class="row"><input type="search" id="food-filter" placeholder="Filter foods" aria-label="Filter foods" value="' + esc(ui.foodFilter) + '" style="max-width:280px"></div>' +
       table + customForm, aside);
   }
@@ -602,7 +604,7 @@
   }
 
   function renderBackup() {
-    const body = '<div class="panel stack"><p class="note">Download everything (setup, logs, check-ins, plan, product table) as one JSON file, or restore from one.</p>' +
+    const body = '<div class="panel stack"><p class="note">Everything in one JSON file: setup, logs, check-ins, meal plan and product table. Restoring a backup replaces all current data.</p>' +
       slot('backup-msgs', msg(ui.backupMsg)) +
       confirmBar('importBackup', '', 'Replace all current data with the backup' + (ui.pendingBackup && ui.pendingBackup.name ? ' “' + ui.pendingBackup.name + '”' : '') + '?', 'Replace') +
       '<div class="row"><button type="button" class="btn" id="backup-export" data-action="backup-export">Export all data</button>' +
@@ -640,19 +642,15 @@
       draftField('log-weight', 'Morning weight (kg)', 'weight') + draftField('log-kcal', 'Calories eaten', 'kcal') +
       draftField('log-protein', 'Protein eaten (g)', 'protein') + draftField('log-steps', 'Steps', 'steps') +
       '</div><div class="row"><button type="submit" class="btn primary" id="log-save">Save day</button>' +
-      '<span class="muted small">Enter saves. Leave a field empty if you did not measure it.</span></div>' + msg(ui.logMsg) + '</form>';
+      '<span class="muted small">Enter saves. Leave a field empty if you didn’t measure it.</span></div>' + msg(ui.logMsg) + '</form>';
     h.push(block('Log a day', form));
 
     const ph = T.phase || {};
-    let tcard = '<div class="kv">' +
-      kv('Targets for ' + E.formatDate(date), fmt(T.kcal) + ' kcal') + kv('Protein', fmt(T.protein) + ' g') +
-      kv('Carbs', fmt(T.carbs) + ' g') + kv('Fat', fmt(T.fat) + ' g') + kv('Phase', esc(ph.label || '')) + '</div>';
+    let tcard = '<div class="stats">' + stat('Calories', fmt(T.kcal), 'kcal') + stat('Protein', fmt(T.protein), 'g') +
+      stat('Carbs', fmt(T.carbs), 'g') + stat('Fat', fmt(T.fat), 'g') + '</div>';
     if (E.dayOfWeek(date) === 6 && state.setup.saturdayMode === 'offplan') tcard += saturdayBudget(c, date, T);
-    if ((T.explanation || []).length) {
-      tcard += '<details id="log-how"' + (ui.open['log-how'] ? ' open' : '') + '><summary class="small">Where these targets come from</summary><ul class="note">' +
-        T.explanation.map(function (l) { return '<li>' + esc(l) + '</li>'; }).join('') + '</ul></details>';
-    }
-    h.push('<div class="panel stack" id="log-targets">' + tcard + '</div>');
+    h.push(block('Targets for ' + E.formatDate(date), '<div class="panel stack-lg" id="log-targets">' + tcard + '</div>',
+      '<span class="chip ' + (ph.type === 'cut' ? 'accent' : ph.type ? 'good' : '') + '">' + esc(ph.label || '') + '</span>', 'log-day-targets'));
 
     // weeks table
     const weeks = [];
@@ -662,10 +660,9 @@
       '<th class="n">Protein</th><th class="n">Steps</th><th class="hide-sm"></th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
       '<div class="row"><button type="button" class="btn" id="log-more" data-action="log-more">Show an older week</button>' +
       (ui.weeksShown > 2 ? '<button type="button" class="btn ghost" id="log-less" data-action="log-less">Show fewer</button>' : '') + '</div>';
-    h.push(block('Diet weeks', '<p class="note">Weeks run Saturday to Friday (diet week: Saturday dinner → Friday dinner). kcal is green within ±5 % of target, red above; protein green within 10 g of target.</p>' + table));
+    h.push(block('Diet weeks', '<p class="note">Weeks run Saturday to Friday. Calories show green within 5 % of target and red above it; protein shows green within 10 g of target.</p>' + table));
     return h.join('');
   }
-  function kv(k, v) { return '<div><span class="label">' + esc(k) + '</span><span class="v">' + v + '</span></div>'; }
   function draftField(id, label, key) {
     const v = ui.logDraft[key];
     return '<label class="field" for="' + id + '">' + esc(label) + '<input type="number" id="' + id + '" data-draft="' + key + '" inputmode="decimal" step="any" min="0" value="' +
@@ -730,17 +727,17 @@
         kcal += f.kcal * it.grams / 100; prot += f.protein * it.grams / 100;
       });
     });
-    return '<div class="banner info">Saturday: breakfast and lunch are off-plan. Planned meals after lunch: <b>' + fmt(kcal) + ' kcal</b>, ' + fmt(prot) +
-      ' g protein. Budget for your off-plan breakfast + lunch: <b>' + fmt(T.kcal - kcal) + ' kcal</b> and at least <b>' + fmt(Math.max(0, T.protein - prot)) + ' g protein</b>.</div>';
+    return '<div class="banner info">Saturday breakfast and lunch are off-plan. The planned meals after lunch come to <b>' + fmt(kcal) + ' kcal</b> and ' + fmt(prot) +
+      ' g protein, which leaves <b>' + fmt(T.kcal - kcal) + ' kcal</b> and at least <b>' + fmt(Math.max(0, T.protein - prot)) + ' g protein</b> for breakfast and lunch.</div>';
   }
 
   function weekRows(c, ws) {
     const T = E.targetsForWeek(state, ws);
     const avg = E.weekAverages(state.logs || {}, ws);
     const ph = T.phase || {};
-    const head = '<tr class="sub"><td colspan="7">' + esc(E.formatRange(ws)) + ' · ' + esc(ph.label || '') +
-      (ph.weekInBlock ? ' week ' + ph.weekInBlock + (ph.blockLength ? ' of ' + ph.blockLength : '') : '') +
-      ' · target ' + fmt(T.kcal) + ' kcal / ' + fmt(T.protein) + ' g protein</td></tr>';
+    const head = '<tr class="sub"><td colspan="7">' + esc(range(ws)) + ' <span class="muted">' + esc(ph.label || '') +
+      (ph.weekInBlock ? ', week ' + ph.weekInBlock + (ph.blockLength ? ' of ' + ph.blockLength : '') : '') +
+      '. Target ' + fmt(T.kcal) + ' kcal, ' + fmt(T.protein) + ' g protein</span></td></tr>';
     const days = E.weekDays(ws).map(function (d) {
       const e = (state.logs || {})[d];
       const future = d > c.today;
@@ -751,7 +748,7 @@
         '<button type="button" class="btn ghost danger" id="log-del-' + d + '" data-action="log-delete" data-date="' + d + '">Delete</button>'
         : (!future ? '<button type="button" class="btn ghost" id="log-add-' + d + '" data-action="log-edit" data-date="' + d + '">Add</button>' : '');
       const smActions = actions.replace(/id="log-(edit|del|add)-/g, 'id="log-$1-sm-');
-      const row = '<tr' + (future ? ' class="muted"' : '') + '><td>' + esc(E.formatDate(d)) + (d === c.today ? ' <span class="chip accent">today</span>' : '') +
+      const row = '<tr' + (future ? ' class="muted"' : '') + '><td>' + esc(E.formatDate(d)) + (d === c.today ? ' <span class="chip accent">Today</span>' : '') +
         (smActions ? '<span class="sub show-sm">' + smActions + '</span>' : '') +
         '</td><td class="n">' + (e && isNum(e.weight) ? fmt(e.weight, 1) : '') + '</td><td class="n muted hide-sm">' +
         (e && isNum(e.weight) && tr && tr.count >= 3 ? fmt(tr.avg, 1) : '') + '</td><td class="n ' + kcalCls + '">' + (e && isNum(e.kcal) ? fmt(e.kcal) : '') +
@@ -761,10 +758,10 @@
         ? '<tr><td colspan="7">' + confirmBar('deleteLog', d, 'Delete the entry for ' + E.formatDate(d) + '?', 'Delete') + '</td></tr>' : '';
       return row + conf;
     }).join('');
-    const foot = '<tr class="total"><td>Average</td><td class="n">' + (isNum(avg.avgWeight) ? fmt(avg.avgWeight, 2) : '–') +
-      ' <span class="muted xs">(' + avg.weighIns + '/7)</span></td><td class="hide-sm"></td><td class="n">' + (isNum(avg.avgKcal) ? fmt(avg.avgKcal) : '–') +
-      ' <span class="muted xs">(' + avg.intakeDays + '/7)</span></td><td class="n">' + (isNum(avg.avgProtein) ? fmt(avg.avgProtein) : '–') +
-      '</td><td class="n">' + (isNum(avg.avgSteps) ? fmt(avg.avgSteps) : '–') + '</td><td class="hide-sm"></td></tr>';
+    const foot = '<tr class="total"><td>Average</td><td class="n">' + (isNum(avg.avgWeight) ? fmt(avg.avgWeight, 2) : '-') +
+      ' <span class="muted xs">(' + avg.weighIns + '/7)</span></td><td class="hide-sm"></td><td class="n">' + (isNum(avg.avgKcal) ? fmt(avg.avgKcal) : '-') +
+      ' <span class="muted xs">(' + avg.intakeDays + '/7)</span></td><td class="n">' + (isNum(avg.avgProtein) ? fmt(avg.avgProtein) : '-') +
+      '</td><td class="n">' + (isNum(avg.avgSteps) ? fmt(avg.avgSteps) : '-') + '</td><td class="hide-sm"></td></tr>';
     return head + days + foot;
   }
 
@@ -834,13 +831,13 @@
     const sum = E.programSummary(state, c.today);
     let banner;
     if (c.today < ps) {
-      banner = '<div class="banner">The program starts ' + esc(E.formatDate(ps)) + ' at dinner; the first check-in is ' + esc(E.formatDate(E.addDays(ps, 6))) +
-        '. Weights you log before then give the first check-in its baseline week. Week-1 targets come from Setup.</div>';
+      banner = '<div class="banner">The program starts ' + esc(E.formatDate(ps)) + ' at dinner and the first check-in is ' + esc(E.formatDate(E.addDays(ps, 6))) +
+        '. Weights you log before then give that check-in a baseline week to compare with.</div>';
     } else if (isFri && !saved_[c.weekNow]) {
       banner = '<div class="banner warn"><b>Check-in due today.</b> Log this morning’s weight first, then save the check-in before the grocery trip. New targets apply from Saturday dinner.' +
-        (lastWeek >= ps && !saved_[lastWeek] ? ' Last week’s check-in (' + esc(E.formatRange(lastWeek)) + ') was not saved: save that one first so this week builds on it.' : '') + '</div>';
+        (lastWeek >= ps && !saved_[lastWeek] ? ' Last week’s check-in (' + esc(range(lastWeek)) + ') wasn’t saved. Save that one first so this week builds on it.' : '') + '</div>';
     } else if (sum.checkinDue) {
-      banner = '<div class="banner warn">The check-in for ' + esc(E.formatRange(sum.checkinDue.weekStart)) + ' was not saved. Save it now; its targets apply to the diet week after it.</div>';
+      banner = '<div class="banner warn">The check-in for ' + esc(range(sum.checkinDue.weekStart)) + ' wasn’t saved. Save it now; its targets apply to the diet week after it.</div>';
     } else {
       banner = '<div class="banner">Next check-in: <b>' + esc(E.formatDate(sum.nextCheckinDate)) + '</b>, morning, after the weigh-in.</div>';
     }
@@ -853,14 +850,14 @@
     const newest = E.dayOfWeek(c.today) === 5 ? c.weekNow : E.addDays(c.weekNow, -7);
     for (let w = newest; w >= first && options.length < 60; w = E.addDays(w, -7)) options.push(w);
     if (options.indexOf(week) < 0) options.unshift(week);
-    const picker = '<label class="field" for="ci-week" style="max-width:340px">Week (Saturday – Friday)<select id="ci-week">' + options.map(function (w) {
-      return '<option value="' + w + '"' + (w === week ? ' selected' : '') + '>' + esc(E.formatRange(w)) + (w === E.addDays(ps, -7) ? ' · baseline' : w < ps ? ' · before the program' : '') +
-        ((state.checkins || {})[w] ? ' · saved' : '') + '</option>';
+    const picker = '<label class="field" for="ci-week" style="max-width:340px">Week<select id="ci-week">' + options.map(function (w) {
+      const tags = [w === E.addDays(ps, -7) ? 'baseline' : w < ps ? 'before the program' : '', (state.checkins || {})[w] ? 'saved' : ''].filter(Boolean);
+      return '<option value="' + w + '"' + (w === week ? ' selected' : '') + '>' + esc(range(w)) + (tags.length ? ' (' + tags.join(', ') + ')' : '') + '</option>';
     }).join('') + '</select></label>';
 
     const cur = rec.cur || {}, prev = rec.prev || {};
-    const avgTable = '<div class="tscroll"><table><thead><tr><th></th><th class="n">Previous week<span class="sub">' + esc(E.formatRange(E.addDays(week, -7))) +
-      '</span></th><th class="n">This week<span class="sub">' + esc(E.formatRange(week)) + '</span></th><th class="n">Change</th></tr></thead><tbody>' +
+    const avgTable = '<div class="tscroll"><table class="compact-sm"><thead><tr><th></th><th class="n">Previous week<span class="sub hide-sm">' + esc(range(E.addDays(week, -7))) +
+      '</span></th><th class="n">This week<span class="sub hide-sm">' + esc(range(week)) + '</span></th><th class="n">Change</th></tr></thead><tbody>' +
       avgRow('7-day average weight', prev.avgWeight, cur.avgWeight, 2, ' kg') +
       countRow('Weigh-ins', prev.weighIns, cur.weighIns) +
       avgRow('Average intake', prev.avgKcal, cur.avgKcal, 0, ' kcal') +
@@ -871,36 +868,26 @@
 
     const lines = [];
     if (!rec.valid) {
-      lines.push('<div class="banner warn">Not enough data for an adaptive update: each week needs at least 4 weigh-ins and this week at least 1 day of logged calories. ' +
-        'Targets carry over unchanged (a scheduled phase change still happens).</div>');
+      lines.push('<div class="banner warn">Not enough data for an adaptive update. Each week needs at least 4 weigh-ins, and this week at least 1 day of logged calories. ' +
+        'Targets carry over unchanged; a scheduled phase change still happens.</div>');
     }
-    const tdeeRows = [];
-    if (rec.valid) {
-      tdeeRows.push(['Observed TDEE', fmt(rec.observedTDEE) + ' kcal', 'avg intake − Δ avg weight × 7700 / 7 = ' + fmt(cur.avgKcal) + ' − (' + signed(rec.deltaKg, 2) +
-        ' kg × 1100) = ' + fmt(rec.observedTDEE) + ' kcal']);
+    const tiles = [];
+    if (rec.valid) tiles.push(stat('Observed TDEE', fmt(rec.observedTDEE), 'kcal', 'From this week’s intake and weight change'));
+    tiles.push(stat('Learned TDEE', fmt(rec.learnedAfter), 'kcal', rec.applied ? 'Updated with this week' : 'Unchanged this week'));
+    tiles.push(stat('Starting TDEE', fmt(rec.formulaTDEE), 'kcal', 'From Setup'));
+    if (rec.targetLossKg > 0 && rec.valid) {
+      tiles.push(stat('Weight change', signed(-rec.actualLossKg, 2), 'kg', fmt(rec.lossRatio * 100) + ' % of the ' + fmt(rec.targetLossKg, 2) + ' kg target'));
     }
-    tdeeRows.push(['Learned TDEE', fmt(rec.learnedAfter) + ' kcal', rec.applied
-      ? '0.7 × ' + fmt(rec.learnedBefore) + ' (previous) + 0.3 × ' + fmt(rec.observedTDEE) + ' (observed) = ' + fmt(rec.learnedAfter) + ' kcal'
-      : 'Held at ' + fmt(rec.learnedBefore) + ' kcal (no update this week)']);
-    tdeeRows.push(['Formula TDEE', fmt(rec.formulaTDEE) + ' kcal', 'From Setup; used for program weeks 1–2']);
-    tdeeRows.push(['Used for next week', rec.tdeeUsedForNext === 'formula' ? 'formula' : 'learned', rec.tdeeUsedForNext === 'formula'
-      ? 'Next week is program week ' + (E.programWeekIndex(state.setup.programStart, E.addDays(week, 7)) + 1) + ': the formula estimate is used for weeks 1–2'
-      : 'From program week 3 the learned value drives the targets']);
-    if (rec.targetLossKg > 0) {
-      tdeeRows.push(['Weight loss vs target', rec.valid ? fmt(rec.actualLossKg, 2) + ' of ' + fmt(rec.targetLossKg, 2) + ' kg' : '–',
-        rec.valid ? fmt(rec.lossRatio * 100, 0) + ' % of target' + (rec.belowTarget ? ' — below 70 %' : '') : '']);
-    }
-    const tdeeTable = '<div class="tscroll"><table><tbody>' + tdeeRows.map(function (r) {
-      return '<tr><td>' + esc(r[0]) + '</td><td class="n"><b>' + esc(r[1]) + '</b></td><td class="formula">' + esc(r[2]) + '</td></tr>';
-    }).join('') + '</tbody></table></div>';
+    const tdeeCard = '<div class="panel stack-lg"><div class="stats">' + tiles.join('') + '</div><p class="note">Next week’s targets are based on the ' +
+      (rec.tdeeUsedForNext === 'formula' ? 'starting TDEE, as they are in program weeks 1 and 2.' : 'learned TDEE.') + '</p></div>';
 
     let diag = '';
     if (rec.stall) {
       const cls = rec.diagnosis === 'adaptation' ? 'warn' : 'bad';
       diag = '<div class="banner ' + cls + '"><b>Stall: loss below 70 % of target for 2 weeks' +
-        (rec.prevBelowTargetSource === 'logs' ? ' (last week worked out from your logs; its check-in was not saved)' : '') + '.</b> <span class="chip ' + cls + '">' + esc(rec.diagnosisText) + '</span> ' +
-        (rec.diagnosis === 'neat' ? 'Average steps ' + fmt(cur.avgSteps) + ' vs ' + fmt(state.setup.steps) + ' in Setup. Targets are not cut this week.'
-          : rec.diagnosis === 'tracking' ? 'Only ' + cur.intakeDays + ' of 7 days logged. Targets are not changed until tracking is complete.'
+        (rec.prevBelowTargetSource === 'logs' ? ' (last week worked out from your logs, as its check-in wasn’t saved)' : '') + '.</b> <span class="chip ' + cls + '">' + esc(DIAG_LABEL[rec.diagnosis] || rec.diagnosisText) + '</span> ' +
+        (rec.diagnosis === 'neat' ? 'Average steps were ' + fmt(cur.avgSteps) + ' against ' + fmt(state.setup.steps) + ' in Setup. Bring the steps back up; food is not cut this week.'
+          : rec.diagnosis === 'tracking' ? 'Only ' + cur.intakeDays + ' of 7 days were logged. Targets stay the same until tracking is complete.'
             : 'The adjustment below is applied.') + '</div>';
     } else if (rec.belowTarget) {
       diag = '<div class="banner">Loss was below 70 % of target this week. A stall is flagged only after 2 weeks in a row.</div>';
@@ -910,19 +897,20 @@
     const nowT = E.targetsForWeek(state, week);
     const nx = rec.next || {};
     const nextWeek = E.addDays(week, 7);
-    const newT = '<div class="tscroll"><table><thead><tr><th></th><th class="n">Current<span class="sub">' + esc(E.formatRange(week)) + '</span></th><th class="n">New<span class="sub">from ' +
+    const newT = '<div class="tscroll"><table><thead><tr><th></th><th class="n">Current<span class="sub">' + esc(range(week)) + '</span></th><th class="n">New<span class="sub">From ' +
       esc(E.formatDate(nextWeek)) + ' dinner</span></th><th class="n">Change</th></tr></thead><tbody>' +
       changeRow('Calories', nowT.kcal, nx.kcal, ' kcal') + changeRow('Protein', nowT.protein, nx.protein, ' g') +
       changeRow('Carbs', nowT.carbs, nx.carbs, ' g') + changeRow('Fat', nowT.fat, nx.fat, ' g') +
       '<tr><td>Phase</td><td class="n">' + esc((nowT.phase || {}).label || '') + '</td><td class="n">' + esc((nx.phase || {}).label || '') + '</td><td></td></tr>' +
       '</tbody></table></div>';
-    // The engine's notes explain the observed/learned TDEE, cap, transition and macro split; add what they leave out.
-    const notes = (rec.notes || []).slice();
-    const said = notes.join(' ').toLowerCase();
-    if (rec.capped && said.indexOf('cap') < 0) notes.push('The change was capped at ±200 kcal for this week.');
-    if (nx.bmrFloorApplied && said.indexOf('bmr') < 0) notes.push('Raised to the calorie floor (BMR).');
+    // Plain-language notes only; the engine's worked arithmetic stays in the saved record.
+    const notes = [];
+    if ((nx.phase || {}).label && (nowT.phase || {}).label !== nx.phase.label) notes.push(nx.phase.label + ' starts ' + E.formatDate(nextWeek) + ' at dinner.');
+    if (rec.capped) notes.push('The change is capped at 200 kcal for this week.');
+    if (nx.bmrFloorApplied) notes.push('Calories are held at your BMR, the lowest the app will go.');
+    if (nx.limited) notes.push('Carbs are at 0 g and fat at its minimum, so calories can’t go lower.');
 
-    const savedLine = saved ? '<span class="chip good">Saved' + (saved.computedOn ? ' ' + esc(E.formatDate(saved.computedOn)) : '') + '</span>' : '<span class="chip warn">Not saved</span>';
+    const savedLine = saved ? '<span class="chip good">Saved' + (saved.computedOn ? ' ' + esc(E.formatDate(saved.computedOn)) : '') + '</span>' : '<span class="chip warn">Not saved yet</span>';
     const changedSinceSave = saved && JSON.stringify(stripMeta(saved)) !== JSON.stringify(stripMeta(rec));
     const saveBtn = '<div class="row"><button type="button" class="btn primary" id="ci-save" data-action="checkin-save">' + (saved ? 'Save again with current logs' : 'Save check-in') + '</button>' +
       savedLine + (changedSinceSave ? '<span class="muted small">Your logs changed since this check-in was saved.</span>' : '') + '</div>' + msg(ui.checkinMsg);
@@ -931,15 +919,16 @@
       const isBaseline = week === E.addDays(ps, -7);
       h.push(block('Check-in', '<div class="row">' + picker + '</div>' + avgTable +
         '<p class="note">' + (isBaseline
-          ? 'This is the week before the program starts. Its averages are the baseline that week 1’s check-in compares against; week-1 targets come from Setup, so nothing here changes your targets.'
-          : 'This week is before the program (which starts ' + esc(E.formatDate(ps)) + '); the baseline will be ' + esc(E.formatRange(E.addDays(ps, -7))) +
+          ? 'This is the week before the program starts. Its averages are the baseline that week 1’s check-in compares with. Week-1 targets come from Setup, so nothing here changes them.'
+          : 'This week is before the program (which starts ' + esc(E.formatDate(ps)) + '); the baseline will be ' + esc(range(E.addDays(ps, -7))) +
             '. Nothing logged this early feeds your targets.') + '</p>'));
       h.push(block('Weight trend', weightChart(c)));
       h.push(block('History', historyTable()));
       return h.join('');
     }
-    h.push(block('Check-in', '<div class="row">' + picker + '</div>' + avgTable + lines.join('') + tdeeTable + diag +
-      '<h3>New targets</h3>' + newT + (notes.length ? '<ul class="note">' + notes.map(function (n) { return '<li>' + esc(n) + '</li>'; }).join('') + '</ul>' : '') + saveBtn));
+    h.push(block('Check-in', '<div class="row">' + picker + '</div>' + avgTable + lines.join('') + diag));
+    h.push(block('Maintenance', tdeeCard, '', 'ci-tdee'));
+    h.push(block('New targets', newT + (notes.length ? '<p class="note">' + esc(notes.join(' ')) + '</p>' : '') + saveBtn, '', 'ci-new'));
     h.push(block('Weight trend', weightChart(c)));
     h.push(block('History', historyTable()));
     return h.join('');
@@ -952,11 +941,11 @@
   }
   function avgRow(label, a, b, d, unit) {
     const diff = isNum(a) && isNum(b) ? b - a : null;
-    return '<tr><td>' + esc(label) + '</td><td class="n">' + (isNum(a) ? fmt(a, d) + unit : '–') + '</td><td class="n">' + (isNum(b) ? fmt(b, d) + unit : '–') +
+    return '<tr><td>' + esc(label) + '</td><td class="n">' + (isNum(a) ? fmt(a, d) + unit : '-') + '</td><td class="n">' + (isNum(b) ? fmt(b, d) + unit : '-') +
       '</td><td class="n">' + (isNum(diff) ? signed(diff, d) + unit : '') + '</td></tr>';
   }
   function countRow(label, a, b) {
-    return '<tr><td>' + esc(label) + '</td><td class="n">' + (a == null ? '–' : a + ' / 7') + '</td><td class="n">' + (b == null ? '–' : b + ' / 7') + '</td><td></td></tr>';
+    return '<tr><td>' + esc(label) + '</td><td class="n">' + (a == null ? '-' : a + ' / 7') + '</td><td class="n">' + (b == null ? '-' : b + ' / 7') + '</td><td></td></tr>';
   }
   function changeRow(label, a, b, unit) {
     return '<tr><td>' + esc(label) + '</td><td class="n">' + fmt(a) + unit + '</td><td class="n"><b>' + fmt(b) + unit + '</b></td><td class="n">' +
@@ -965,17 +954,17 @@
 
   function historyTable() {
     const recs = Object.keys(state.checkins || {}).sort().reverse().map(function (k) { return state.checkins[k]; });
-    if (!recs.length) return '<p class="note">No check-ins saved yet.</p>';
-    return '<div class="tscroll"><table><thead><tr><th>Week</th><th class="n">Avg weight</th><th class="n">Δ</th><th class="n">Avg kcal</th>' +
+    if (!recs.length) return '<div class="panel empty"><h3>No check-ins yet</h3><p class="note">Each Friday’s saved check-in shows up here with its averages, maintenance and new targets.</p></div>';
+    return '<div class="tscroll"><table><thead><tr><th>Week</th><th class="n">Avg weight</th><th class="n">Change</th><th class="n">Avg kcal</th>' +
       '<th class="n">Observed TDEE</th><th class="n">Learned TDEE</th><th class="n">Next kcal</th><th>Result</th></tr></thead><tbody>' +
       recs.map(function (r) {
         const cur = r.cur || {};
-        const res = !r.valid ? '<span class="chip">not enough data</span>'
-          : r.stall ? '<span class="chip ' + (r.applied ? 'warn' : 'bad') + '">' + esc(r.diagnosisText) + '</span>'
-            : r.goalReached ? '<span class="chip good">goal reached</span>'
-              : r.belowTarget ? '<span class="chip warn">below 70 % of target (' + fmt(r.lossRatio * 100) + ' %)</span>'
-                : r.targetLossKg > 0 ? '<span class="chip good">on track (' + fmt(r.lossRatio * 100) + ' %)</span>' : '<span class="chip good">maintenance</span>';
-        return '<tr><td>' + esc(E.formatRange(r.weekStart)) + '</td><td class="n">' + fmt(cur.avgWeight, 2) + '</td><td class="n">' + signed(r.deltaKg, 2) +
+        const res = !r.valid ? '<span class="chip">Not enough data</span>'
+          : r.stall ? '<span class="chip ' + (r.applied ? 'warn' : 'bad') + '">' + esc(DIAG_LABEL[r.diagnosis] || r.diagnosisText) + '</span>'
+            : r.goalReached ? '<span class="chip good">Goal reached</span>'
+              : r.belowTarget ? '<span class="chip warn">Below target (' + fmt(r.lossRatio * 100) + ' %)</span>'
+                : r.targetLossKg > 0 ? '<span class="chip good">On track (' + fmt(r.lossRatio * 100) + ' %)</span>' : '<span class="chip good">Maintenance</span>';
+        return '<tr><td>' + esc(range(r.weekStart)) + '</td><td class="n">' + fmt(cur.avgWeight, 2) + '</td><td class="n">' + signed(r.deltaKg, 2) +
           '</td><td class="n">' + fmt(cur.avgKcal) + '</td><td class="n">' + fmt(r.observedTDEE) + '</td><td class="n">' + fmt(r.learnedAfter) +
           '</td><td class="n">' + fmt(r.next && r.next.kcal) + '</td><td>' + res + '</td></tr>';
       }).join('') + '</tbody></table></div>';
@@ -1045,7 +1034,7 @@
     const legend = '<div class="legend"><span><i class="lg-dot"></i>Daily weight</span><span><i style="border-color:var(--chart-avg)"></i>7-day average</span>' +
       '<span><i style="border-color:var(--chart-target);border-top-style:dashed"></i>Target line</span>' +
       (isNum(goal) ? '<span><i style="border-color:var(--chart-goal)"></i>Goal ' + fmt(goal, 1) + ' kg' + (showGoal ? '' : ' (below the chart)') + '</span>' : '') + '</div>';
-    const empty = pts.length ? '' : '<p class="note">No weights logged yet. Log morning weights on the Daily Log tab; the target line shows the planned path.</p>';
+    const empty = pts.length ? '' : '<p class="note">No weights logged yet. Log morning weights on the Daily Log tab; until then the chart shows the planned path.</p>';
     return '<div class="panel stack">' + svg + legend + empty + '</div>';
   }
 
@@ -1057,18 +1046,19 @@
     const T = E.targetsForWeek(state, week);
     const h = [];
     const weekSeg = '<div class="seg" role="group">' +
-      '<button type="button" id="plan-week-this" data-action="plan-week" data-value="this" aria-pressed="' + String(ui.planWeek !== 'next') + '">This week · ' + esc(E.formatRange(c.weekNow)) + '</button>' +
-      '<button type="button" id="plan-week-next" data-action="plan-week" data-value="next" aria-pressed="' + String(ui.planWeek === 'next') + '">Next week · from ' + esc(E.formatDate(E.addDays(c.weekNow, 7))) + ' dinner</button></div>';
-    h.push('<div class="row" id="plan-weekrow">' + weekSeg + '</div>');
+      '<button type="button" id="plan-week-this" data-action="plan-week" data-value="this" aria-pressed="' + String(ui.planWeek !== 'next') + '">This week</button>' +
+      '<button type="button" id="plan-week-next" data-action="plan-week" data-value="next" aria-pressed="' + String(ui.planWeek === 'next') + '">Next week</button></div>';
+    h.push('<div class="row" id="plan-weekrow">' + weekSeg + '<span class="muted small">' + (ui.planWeek === 'next'
+      ? 'From ' + esc(E.formatDate(week)) + ' dinner' : esc(range(week))) + '</span></div>');
     if (ui.planWeek === 'next' && T.source !== 'checkin' && !(state.checkins || {})[c.weekNow] && E.programWeekIndex(state.setup.programStart, week) > 0) {
       h.push(slot('plan-prov', '<div class="banner">Provisional: next week’s targets are set by Friday’s check-in. Amounts will update when you save it.</div>'));
     }
 
     if (!state.plan || !state.plan.base) {
-      h.push(block('Meal plan', '<div class="panel stack"><p class="note">One fixed day, eaten every day, built only from your liked foods. Each meal is one protein food, one carb food and vegetables or fruit, ' +
-        'with a fat source when needed. Grams are solved to hit ' + fmt(T.kcal) + ' kcal (±5 %) and ' + fmt(T.protein) + ' g protein (±10 g), with at least 2 vegetables, 1 fruit and 25 g fibre.</p>' +
-        '<div class="row"><button type="button" class="btn primary" id="plan-generate" data-action="plan-generate">Generate plan</button><span class="muted small">' + c.liked.length + ' liked foods · ' +
-        state.setup.mealsPerDay + ' meals per day</span></div>' + msg(ui.planMsg) + '</div>'));
+      h.push(block('Meal plan', '<div class="panel empty"><h3>No meal plan yet</h3><p class="note">One fixed day that you eat every day, built from the foods you like. ' +
+        'Each meal has a protein, a carb and vegetables or fruit, sized to hit ' + fmt(T.kcal) + ' kcal and ' + fmt(T.protein) + ' g protein.</p>' +
+        '<div class="row"><button type="button" class="btn primary" id="plan-generate" data-action="plan-generate">Generate plan</button><span class="muted small">' + c.liked.length + ' liked foods, ' +
+        state.setup.mealsPerDay + ' meals a day</span></div>' + msg(ui.planMsg) + '</div>'));
       return h.join('');
     }
 
@@ -1082,23 +1072,23 @@
 
     // summary
     const d = tot.day;
-    const summ = '<div class="tscroll"><table><thead><tr><th></th><th class="n">Target</th><th class="n">Plan</th><th class="n">Difference</th><th>Check</th></tr></thead><tbody>' +
+    const summ = '<div class="tscroll"><table><thead><tr><th></th><th class="n">Target</th><th class="n">Plan</th><th class="n hide-sm">Difference</th><th class="hide-sm">Check</th></tr></thead><tbody>' +
       sumRow('Calories', T.kcal, d.kcal, ' kcal', Math.abs(chk.kcalDiffPct) <= 5,
-        signed(chk.kcalDiffPct, Math.max(1, M.limitDecimals(chk.kcalDiffPct, (chk.kcalDiffPct < 0 ? -1 : 1) * 5))) + ' % (limit ±5 %)') +
+        signed(chk.kcalDiffPct, Math.max(1, M.limitDecimals(chk.kcalDiffPct, (chk.kcalDiffPct < 0 ? -1 : 1) * 5))) + ' %, limit 5 %') +
       sumRow('Protein', T.protein, d.protein, ' g', Math.abs(chk.proteinDiffG) <= 10,
-        signed(chk.proteinDiffG, M.limitDecimals(chk.proteinDiffG, (chk.proteinDiffG < 0 ? -1 : 1) * 10)) + ' g (limit ±10 g)',
+        signed(chk.proteinDiffG, M.limitDecimals(chk.proteinDiffG, (chk.proteinDiffG < 0 ? -1 : 1) * 10)) + ' g, limit 10 g',
         M.limitDecimals(chk.proteinDiffG, (chk.proteinDiffG < 0 ? -1 : 1) * 10)) +
       sumRow('Carbs', T.carbs, d.carbs, ' g', null, '') +
       sumRow('Fat', T.fat, d.fat, ' g', null, '') +
-      sumRow('Fibre', 25, d.fibre, ' g', d.fibre >= 25, 'at least 25 g', M.limitDecimals(d.fibre, 25)) +
-      '<tr><td>Vegetables / fruit</td><td class="n">≥ 2 / ≥ 1</td><td class="n">' + chk.vegCount + ' / ' + chk.fruitCount + '</td><td></td><td>' +
-      okChip(chk.vegCount >= 2 && chk.fruitCount >= 1, 'different vegetables / fruit') + '</td></tr></tbody></table></div>';
+      sumRow('Fibre', 25, d.fibre, ' g', d.fibre >= 25, 'At least 25 g', M.limitDecimals(d.fibre, 25)) +
+      sumRowText('Vegetables, fruit', '2, 1', chk.vegCount + ', ' + chk.fruitCount,
+        okChip(chk.vegCount >= 2 && chk.fruitCount >= 1, chk.vegCount >= 2 && chk.fruitCount >= 1 ? 'Enough variety' : 'Needs 2 vegetables and 1 fruit')) + '</tbody></table></div>';
 
     const actions = '<div class="row"><button type="button" class="btn" id="plan-regenerate" data-action="plan-regenerate">Regenerate plan</button>' +
-      '<span class="muted small">Generated for ' + esc(E.formatRange(state.plan.weekGenerated || week)) + '. Weekly target changes only rescale grams (carbs first, then fat).</span></div>' +
+      '<span class="muted small">Generated for ' + esc(range(state.plan.weekGenerated || week)) + '. When targets change, only the grams change.</span></div>' +
       confirmBar('regen', '', 'Replace the current meals, including your swaps, with a newly generated plan?', 'Regenerate');
 
-    h.push(block('Day totals · ' + E.formatRange(week), slot('plan-msgs', disallowedBanner(c) + (warnings.length ? '<div class="banner warn"><ul class="note" style="margin:0;padding-left:18px">' +
+    h.push(block('Day totals', slot('plan-msgs', disallowedBanner(c) + (warnings.length ? '<div class="banner warn"><ul class="note" style="margin:0;padding-left:18px">' +
       warnings.map(function (w) { return '<li>' + esc(w) + '</li>'; }).join('') + '</ul></div>' : '')) + summ + actions + slot('plan-msg', msg(ui.planMsg)), '', 'day-totals'));
 
     // meals
@@ -1110,14 +1100,14 @@
         const cands = M.swapCandidates(plan, c.foods, c.liked, c.excluded, m.key, idx);
         const swap = cands.length ? '<select id="swap-' + m.key + '-' + idx + '" data-swap="1" data-meal="' + m.key + '" data-idx="' + idx + '" aria-label="Swap ' + esc(f.name) + '">' +
           '<option value="">Swap…</option>' + cands.map(function (id) { return '<option value="' + esc(id) + '">' + esc(c.foods[id].name) + '</option>'; }).join('') + '</select>'
-          : '<span class="muted xs">no alternative liked</span>';
+          : '<span class="muted xs">No liked alternative</span>';
         return '<tr><td><span class="role">' + esc(ROLE_LABEL[it.role] || it.role) + '</span></td><td>' + esc(f.name) + '<span class="sub">' + esc(f.nameNl || '') + '</span></td><td class="n">' + amountText(f, it.grams) +
           '</td><td class="n">' + fmt(f.kcal * k) + '</td><td class="n">' + fmt(f.protein * k, 1) + '</td><td class="n">' + fmt(f.carbs * k, 1) + '</td><td class="n">' + fmt(f.fat * k, 1) +
           '</td><td class="n">' + fmt(f.fibre * k, 1) + '</td><td>' + swap + '</td></tr>';
       }).join('');
       const occ = G.mealOccurrences(m.key, state.setup.saturdayMode);
-      return '<div class="tscroll"><div class="meal-head"><h3>' + esc(m.name) + '</h3><span class="muted small">' + fmt(m.share * 100) + ' % of the day · ' + occ + '× in the grocery week</span></div>' +
-        '<table><thead><tr><th>Role</th><th>Food</th><th class="n">Amount</th><th class="n">kcal</th><th class="n">P</th><th class="n">C</th><th class="n">F</th><th class="n">Fibre</th><th>Swap</th></tr></thead><tbody>' +
+      return '<div class="tscroll"><div class="meal-head"><h3>' + esc(m.name) + '</h3><span class="muted small">' + fmt(m.share * 100) + ' % of the day, eaten ' + occ + '× in the grocery week</span></div>' +
+        '<table class="meal-table"><thead><tr><th>Role</th><th>Food</th><th class="n">Amount</th><th class="n">kcal</th><th class="n">P</th><th class="n">C</th><th class="n">F</th><th class="n">Fibre</th><th>Swap</th></tr></thead><tbody>' +
         rows + '</tbody><tfoot><tr><td></td><td>Meal total</td><td></td><td class="n">' + fmt(mt.kcal) + '</td><td class="n">' + fmt(mt.protein, 1) + '</td><td class="n">' + fmt(mt.carbs, 1) +
         '</td><td class="n">' + fmt(mt.fat, 1) + '</td><td class="n">' + fmt(mt.fibre, 1) + '</td><td></td></tr></tfoot></table></div>';
     }).join('');
@@ -1134,10 +1124,15 @@
     return h.join('');
   }
   function unique(a) { return a.filter(function (x, i) { return a.indexOf(x) === i; }); }
-  function okChip(ok, text) { return '<span class="chip ' + (ok ? 'good' : 'bad') + '">' + (ok ? '✓ ' : '✗ ') + esc(text) + '</span>'; }
+  function okChip(ok, text) { return '<span class="chip ' + (ok ? 'good' : 'bad') + '">' + esc(text) + '</span>'; }
   function sumRow(label, target, actual, unit, ok, text, dec) {
-    return '<tr><td>' + esc(label) + '</td><td class="n">' + fmt(target, dec || 0) + unit + '</td><td class="n">' + fmt(actual, dec || 0) + unit + '</td><td class="n">' + signed(actual - target, dec || 0) + unit +
-      '</td><td>' + (ok == null ? '' : okChip(ok, text)) + '</td></tr>';
+    const chip = ok == null ? '' : okChip(ok, text);
+    return '<tr><td>' + esc(label) + (chip ? '<span class="sub show-sm">' + chip + '</span>' : '') + '</td><td class="n">' + fmt(target, dec || 0) + unit + '</td><td class="n">' + fmt(actual, dec || 0) + unit +
+      '</td><td class="n hide-sm">' + signed(actual - target, dec || 0) + unit + '</td><td class="hide-sm">' + chip + '</td></tr>';
+  }
+  function sumRowText(label, target, actual, chip) {
+    return '<tr><td>' + esc(label) + '<span class="sub show-sm">' + chip + '</span></td><td class="n">' + target + '</td><td class="n">' + actual +
+      '</td><td class="hide-sm"></td><td class="hide-sm">' + chip + '</td></tr>';
   }
   function planDiff(c, a, b, ta, tb, estimated) {
     const name = function (id) { return (c.foods[id] || {}).name || id; };
@@ -1156,14 +1151,14 @@
     a.meals.forEach(function (pm) {
       if (!b.meals.some(function (m) { return m.key === pm.key; })) lines.push((pm.name || pm.key) + ': meal removed');
     });
-    const head = '<p class="note">Targets ' + fmt(ta.kcal) + ' → ' + fmt(tb.kcal) + ' kcal (' + signed(tb.kcal - ta.kcal, 0) + '), carbs ' + fmt(ta.carbs) + ' → ' + fmt(tb.carbs) +
+    const head = '<p class="note">Calories ' + fmt(ta.kcal) + ' → ' + fmt(tb.kcal) + ' kcal (' + signed(tb.kcal - ta.kcal, 0) + '), carbs ' + fmt(ta.carbs) + ' → ' + fmt(tb.carbs) +
       ' g, fat ' + fmt(ta.fat) + ' → ' + fmt(tb.fat) + ' g, protein ' + fmt(ta.protein) + ' → ' + fmt(tb.protein) + ' g.' +
-      (estimated ? ' Last week’s plan was not recorded, so it is estimated from the current meals at last week’s targets.' : '') + '</p>';
+      (estimated ? ' Last week’s plan wasn’t recorded, so it is estimated from the current meals at last week’s targets.' : '') + '</p>';
     const trimmed = tb.protein === ta.protein && b.meals.some(function (m) {
       const pm = a.meals.filter(function (x) { return x.key === m.key; })[0];
       return pm && m.items.some(function (it, ii) { const o = pm.items[ii]; return o && o.foodId === it.foodId && it.role === 'protein' && it.grams < o.grams; });
     });
-    const why = trimmed && tb.carbs > ta.carbs ? '<p class="note">Protein portions are a little smaller although the protein target is the same: the extra potatoes, oats and bread carry protein too, so the day stays within 10 g of its protein target.</p>' : '';
+    const why = trimmed && tb.carbs > ta.carbs ? '<p class="note">Protein portions are a little smaller with the same protein target, because the extra carbs carry some protein too.</p>' : '';
     if (!lines.length) return head + '<p class="note">No changes: same foods, same amounts.</p>';
     return head + '<ul class="note">' + lines.map(function (l) { return '<li>' + esc(l) + '</li>'; }).join('') + '</ul>' + why;
   }
@@ -1182,18 +1177,20 @@
     const coming = E.dayOfWeek(c.today) === 6 ? c.today : E.nextSaturdayOnOrAfter(E.addDays(c.today, 1));
     const end = E.addDays(week, 6);
     const weekSeg = '<div class="seg" role="group">' +
-      '<button type="button" id="groc-week-coming" data-action="groc-week" data-value="coming" aria-pressed="' + String(ui.grocWeek !== 'previous') + '">Coming diet week · ' + esc(E.formatDate(coming)) + '</button>' +
-      '<button type="button" id="groc-week-previous" data-action="groc-week" data-value="previous" aria-pressed="' + String(ui.grocWeek === 'previous') + '">Current diet week · ' + esc(E.formatDate(E.addDays(coming, -7))) + '</button></div>';
-    h.push('<div class="row" id="groc-weekrow">' + weekSeg + '</div>');
+      '<button type="button" id="groc-week-coming" data-action="groc-week" data-value="coming" aria-pressed="' + String(ui.grocWeek !== 'previous') + '">Coming week</button>' +
+      '<button type="button" id="groc-week-previous" data-action="groc-week" data-value="previous" aria-pressed="' + String(ui.grocWeek === 'previous') + '">Current week</button></div>';
+    h.push('<div class="row" id="groc-weekrow">' + weekSeg + '<span class="muted small">' + esc(E.formatDate(week)) + ' dinner to ' + esc(E.formatDate(end)) + ' dinner</span></div>');
 
     const imp = state.priceMeta || {};
-    const priceLine = '<span class="muted small">Prices last imported: <b>' + (imp.lastImport ? esc(dateLong(imp.lastImport)) + (imp.lastImportFile ? ' (' + esc(imp.lastImportFile) + ')' : '') : 'never') + '</b></span>';
+    const priceLine = '<span class="muted small">' + (imp.lastImport ? 'Prices last imported ' + esc(dateLong(imp.lastImport)) + (imp.lastImportFile ? ' from ' + esc(imp.lastImportFile) : '')
+      : 'Prices not imported yet') + '</span>';
     const tools = '<div class="row"><button type="button" class="btn" id="groc-export" data-action="groc-export">Export grocery list</button>' +
       '<button type="button" class="btn" id="groc-import" data-action="pick-file" data-target="file-prices">Import prices…</button>' +
       priceLine + '</div>' + slot('groc-msgs', exportBox('groceries') + msg(ui.importMsg) + importErrors() + unmatchedPanel(c));
 
     if (!state.plan || !state.plan.base) {
-      h.push(block('Groceries', '<div class="panel stack"><p class="note">Generate a meal plan first; the grocery list is built from it.</p>' + tools + '</div>'));
+      h.push(block('Groceries', '<div class="panel empty"><h3>No grocery list yet</h3><p class="note">The list is built from your meal plan. Generate one first.</p>' +
+        '<div class="row"><button type="button" class="btn primary" id="groc-goto-plan" data-action="goto" data-tab="plan">Open Meal Plan</button></div></div>' + tools));
       h.push(renderProductTable(c));
       return h.join('');
     }
@@ -1204,10 +1201,9 @@
     const provisional = week > c.weekNow && T.source !== 'checkin' && !(state.checkins || {})[E.addDays(week, -7)] &&
       E.programWeekIndex(state.setup.programStart, week) > 0;
 
-    const intro = '<p class="note"><b>' + esc(E.formatDate(week)) + ' dinner → ' + esc(E.formatDate(end)) + ' dinner.</b> Targets ' + fmt(T.kcal) + ' kcal / ' + fmt(T.protein) + ' g protein (' +
-      esc((T.phase || {}).label || '') + '). Quantities = the fixed day’s grams per meal × times that meal occurs in the window: meals after lunch ×7, breakfast and lunch ×' +
-      (state.setup.saturdayMode === 'offplan' ? '6 (Saturday off-plan)' : '7 (Saturday included)') + '.</p>' +
-      (provisional ? '<div class="banner">Provisional: the check-in for ' + esc(E.formatRange(E.addDays(week, -7))) + ' has not been saved yet. Save it on Friday morning and this list updates.</div>' : '');
+    const intro = '<p class="note">' + esc((T.phase || {}).label || '') + ' targets: ' + fmt(T.kcal) + ' kcal and ' + fmt(T.protein) + ' g protein a day. ' +
+      (state.setup.saturdayMode === 'offplan' ? 'Breakfast and lunch are bought for 6 days (Saturday is off-plan), the other meals for 7.' : 'Every meal is bought for 7 days.') + '</p>' +
+      (provisional ? '<div class="banner">Provisional: the check-in for ' + esc(range(E.addDays(week, -7))) + ' isn’t saved yet. Save it on Friday morning and this list updates.</div>' : '');
 
     // store totals
     const totals = '<div class="tscroll"><table><thead><tr><th>Store</th><th class="n">Total</th><th class="n">Items priced</th><th class="n">Missing</th><th class="n">Needs price script</th></tr></thead><tbody>' +
@@ -1236,28 +1232,27 @@
     const total = ui.grocView === 'cheapest' ? br.cheapest.total : br.stores[ui.grocView].total;
     const rows = items.map(function (i) {
       const f = c.foods[i.foodId] || { name: i.foodId };
-      const q = qById[i.foodId];
-      const need = '<b>' + fmt(i.needG) + ' g</b>' + (f.unit ? '<span class="sub">≈ ' + fmt(i.needG / f.unit.grams, 1) + ' ' + esc(f.unit.name) + 's</span>' : '') +
-        (q ? '<span class="sub">' + q.perMeal.map(function (pm) { return fmt(pm.grams) + ' g × ' + pm.times; }).join(' + ') + '</span>' : '');
+      const need = '<b>' + fmt(i.needG) + ' g</b>' + (f.unit ? '<span class="sub">≈ ' + fmt(i.needG / f.unit.grams, 1) + ' ' + esc(f.unit.name) + 's</span>' : '');
       if (!i.row) {
-        return '<tr><td>' + esc(f.name) + '</td>' + (showStore ? '<td></td>' : '') + '<td class="n">' + need + '</td><td colspan="8" class="muted">No product row for this store</td></tr>';
+        return '<tr><td>' + esc(f.name) + '</td>' + (showStore ? '<td></td>' : '') + '<td class="n">' + need + '</td><td colspan="6" class="muted">No product row for this store</td></tr>';
       }
       const r = i.row;
       const st = i.stale || G.isStale(r, c.today);
-      const flag = st && st.stale ? '<span class="chip warn" title="' + esc(st.reason) + '">run price script</span>' + (st.reason === 'estimate' ? '<span class="sub">estimate</span>' : '') : '<span class="chip good">current</span>';
-      return '<tr><td>' + esc(f.name) + '</td>' + (showStore ? '<td>' + esc(i.store) + '</td>' : '') + '<td class="n">' + need + '</td><td>' + esc(r.product) + (r.promo ? ' <span class="chip accent">promo</span>' : '') +
-        (r.url ? '<span class="sub"><a href="' + esc(r.url) + '" target="_blank" rel="noopener">product page</a></span>' : '') + '</td><td class="mono">' + esc(r.ean || '–') +
-        '</td><td class="n">' + fmt(r.packSizeG) + ' g</td><td class="n">' + eur(r.price) + '</td><td class="n">' + (r.date ? esc(r.date) : '–') + '</td><td class="n">' + (i.packs == null ? '–' : i.packs) +
-        '</td><td class="n"><b>' + eur(i.cost) + '</b></td><td class="n">' + (isNum(i.leftoverG) ? fmt(i.leftoverG) + ' g' : '–') + '</td><td>' + flag + '</td></tr>';
+      const flag = st && st.stale ? '<span class="chip warn" title="' + esc(st.reason) + '">Run price script</span>' + (st.reason === 'estimate' ? '<span class="sub">Estimate</span>' : '') : '<span class="chip good">Current</span>';
+      const meta = [r.ean ? '<span class="mono">' + esc(r.ean) + '</span>' : '', r.url ? '<a href="' + esc(r.url) + '" target="_blank" rel="noopener">Product page</a>' : ''].filter(Boolean).join(', ');
+      return '<tr><td>' + esc(f.name) + '</td>' + (showStore ? '<td>' + esc(i.store) + '</td>' : '') + '<td class="n">' + need + '</td><td class="prod">' + esc(r.product) +
+        (r.promo ? ' <span class="chip accent">Promo</span>' : '') + (meta ? '<span class="sub">' + meta + '</span>' : '') +
+        '</td><td class="n">' + (i.packs == null ? '-' : i.packs + ' × ') + fmt(r.packSizeG) + ' g</td><td class="n">' + eur(r.price) + '<span class="sub">' + (r.date ? esc(r.date) : 'No date') + '</span>' +
+        '</td><td class="n"><b>' + eur(i.cost) + '</b></td><td class="n">' + (isNum(i.leftoverG) ? fmt(i.leftoverG) + ' g' : '-') + '</td><td>' + flag + '</td></tr>';
     }).join('');
-    const table = '<div class="tscroll"><table><thead><tr><th>Food</th>' + (showStore ? '<th>Store</th>' : '') + '<th class="n">Need this week</th><th>Product</th><th>EAN</th><th class="n">Pack</th><th class="n">Price</th>' +
-      '<th class="n">Price date</th><th class="n">Packs</th><th class="n">Cost</th><th class="n">Leftover</th><th>Price status</th></tr></thead><tbody>' + rows +
-      '</tbody><tfoot><tr><td colspan="' + (showStore ? 9 : 8) + '">Total' + (ui.grocView === 'cheapest' ? ' (best store per item)' : ' at ' + esc(ui.grocView)) + '</td><td class="n">' + eur(total) +
+    const table = '<div class="tscroll"><table><thead><tr><th>Food</th>' + (showStore ? '<th>Store</th>' : '') + '<th class="n">Need</th><th>Product</th><th class="n">Packs</th>' +
+      '<th class="n">Price</th><th class="n">Cost</th><th class="n">Leftover</th><th>Price status</th></tr></thead><tbody>' + rows +
+      '</tbody><tfoot><tr><td colspan="' + (showStore ? 6 : 5) + '">Total' + (ui.grocView === 'cheapest' ? ', best store per item' : ' at ' + esc(ui.grocView)) + '</td><td class="n">' + eur(total) +
       '</td><td colspan="2"></td></tr></tfoot></table></div>';
 
     h.push(block('Groceries', slot('groc-banned', disallowedBanner(c)) + intro + tools + totals + missingTxt));
     h.push(block('Shopping list', '<div class="row">' + viewSeg + '</div>' + table +
-      '<p class="note">Prices marked “run price script” are older than 7 days, have no date, or are seeded estimates. Export the list, run <span class="mono">fetch_prices.py</span>, then import its output.</p>'));
+      '<p class="note">“Run price script” means the price is older than 7 days, has no date, or is a built-in estimate. Export the list, run <span class="mono">fetch_prices.py</span>, then import its output.</p>'));
     h.push(renderProductTable(c));
     return h.join('');
   }
@@ -1276,12 +1271,12 @@
       .map(function (f) { return '<option value="' + esc(f.id) + '">' + esc(f.name) + '</option>'; }).join('');
     const rows = un.map(function (r, i) {
       const sel = ui.mapSel[unmatchedKey(r)] || '';
-      return '<tr><td>' + esc(r.store) + '</td><td>' + esc(r.product) + '</td><td class="mono">' + esc(r.ean || '–') + '</td><td class="n">' + fmt(r.pack_size_g) + ' g</td><td class="n">' + eur(r.price_eur) +
+      return '<tr><td>' + esc(r.store) + '</td><td>' + esc(r.product) + '</td><td class="mono">' + esc(r.ean || '-') + '</td><td class="n">' + fmt(r.pack_size_g) + ' g</td><td class="n">' + eur(r.price_eur) +
         '</td><td><select id="map-' + i + '" data-map="' + esc(unmatchedKey(r)) + '" aria-label="Food for ' + esc(r.product) + '"><option value="">Choose food…</option>' +
         opts.replace('value="' + esc(sel) + '"', 'value="' + esc(sel) + '" selected') + '</select></td><td><button type="button" class="btn" id="map-add-' + i + '" data-action="map-unmatched" data-idx="' + i +
         '">Add to product table</button></td></tr>';
     }).join('');
-    return '<div class="stack"><h3>Unmatched import rows (' + un.length + ')</h3><p class="note">These rows matched no product by store + EAN or store + name. Map each one to a food to add it to the product table.</p>' +
+    return '<div class="stack"><h3>Unmatched import rows (' + un.length + ')</h3><p class="note">These rows matched no product by store and EAN or by store and name. Map each one to a food to add it to the product table.</p>' +
       '<div class="tscroll"><table><thead><tr><th>Store</th><th>Product</th><th>EAN</th><th class="n">Pack</th><th class="n">Price</th><th>Food</th><th></th></tr></thead><tbody>' + rows + '</tbody></table></div>' +
       '<div class="row"><button type="button" class="btn ghost" id="unmatched-clear" data-action="unmatched-clear">Dismiss all unmatched rows</button></div></div>';
   }
@@ -1314,7 +1309,7 @@
         (ui.confirm && ui.confirm.kind === 'deleteProduct' && ui.confirm.key === r.id ? confirmBar('deleteProduct', r.id, 'Delete this row?', 'Delete') : '') + '</td></tr>';
     }).join('');
     const np = ui.newProd;
-    const addForm = '<details class="panel" id="np-details"' + (ui.open['np-details'] ? ' open' : '') + '><summary><b>Add a product row</b></summary><div class="stack" style="margin-top:10px">' +
+    const addForm = '<details class="panel" id="np-details"' + (ui.open['np-details'] ? ' open' : '') + '><summary><b>Add a product row</b></summary><div class="stack">' +
       '<div class="grid">' +
       '<label class="field" for="np-store">Store<select id="np-store" data-newprod="store">' + STORES.map(function (s) { return '<option' + ((np.store || STORES[0]) === s ? ' selected' : '') + '>' + s + '</option>'; }).join('') + '</select></label>' +
       '<label class="field" for="np-food">Food<select id="np-food" data-newprod="foodId"><option value="">Choose…</option>' + foodOpts(np.foodId) + '</select></label>' +
@@ -1323,12 +1318,12 @@
       '<label class="field" for="np-pack">Pack size (g)<input type="number" id="np-pack" data-newprod="packSizeG" min="1" step="any" value="' + esc(np.packSizeG || '') + '"></label>' +
       '<label class="field" for="np-price">Price (€)<input type="number" id="np-price" data-newprod="price" min="0" step="0.01" value="' + esc(np.price || '') + '"></label>' +
       '</div><div class="row"><button type="button" class="btn primary" id="np-add" data-action="prod-add">Add row</button><span class="muted small">The price date is set to today.</span></div></div></details>';
-    const body2 = '<details class="panel" id="prod-details"' + (ui.prodOpen ? ' open' : '') + '><summary><b>Edit product table</b> <span class="muted small">(' + (state.products || []).length + ' rows · Colruyt, Delhaize, Carrefour)</span></summary>' +
-      '<div class="stack" style="margin-top:12px"><p class="note">Every row is editable. Changing a price sets its date to today. Pack sizes are in grams (eggs: count × 55 g, liquids: 1 ml = 1 g, oil 0.92 g/ml).</p>' +
+    const body2 = '<details class="panel" id="prod-details"' + (ui.prodOpen ? ' open' : '') + '><summary><b>Edit product table</b> <span class="muted small">' + (state.products || []).length + ' rows across Colruyt, Delhaize and Carrefour</span></summary>' +
+      '<div class="stack"><p class="note">Every row is editable. Changing a price sets its date to today. Pack sizes are in grams (eggs: count × 55 g, liquids: 1 ml = 1 g, oil 0.92 g/ml).</p>' +
       slot('prod-msgs', msg(ui.prodMsg)) + '<div class="row">' + storeSeg + '<button type="button" class="btn ghost danger" id="prod-reset" data-action="prod-reset">Reset table to built-in products</button></div>' +
       confirmBar('resetProducts', '', 'Replace the whole product table with the built-in rows? Imported and edited prices are lost.', 'Reset') + addForm +
       '<div class="tscroll"><table><thead><tr><th>Store</th><th>Food</th><th>Product</th><th>EAN</th><th>Pack g</th><th>Price €</th><th>Promo</th><th>Price date</th><th>Source</th><th></th></tr></thead><tbody>' +
-      (body || '<tr><td colspan="10" class="muted">No rows.</td></tr>') + '</tbody></table></div></div></details>';
+      (body || '<tr><td colspan="10" class="muted">No rows for this store. Add one above.</td></tr>') + '</tbody></table></div></div></details>';
     return block('Product table', body2);
   }
 
@@ -1411,6 +1406,7 @@
       ensureProgramSnapshot();
     },
     'plan-week': function (el) { ui.planWeek = el.dataset.value; scheduleRender(); },
+    'goto': function (el) { setTab(el.dataset.tab); },
     'plan-generate': function () { ui.focusAfter = 'plan-regenerate'; generatePlan(); },
     'plan-regenerate': function () { ui.confirm = { kind: 'regen' }; scheduleRender(); },
     'groc-week': function (el) { ui.grocWeek = el.dataset.value; scheduleRender(); },
@@ -1775,6 +1771,9 @@
     if ((name === 'plan' || name === 'groceries') && state && recordPlanWeek(ctx())) S.save('plan', state);
     try { root.history.replaceState(null, '', '#' + name); } catch (e) { /* sandboxed */ }
     render();
+    // Restart the short fade-in so a tab switch reads as a change of view.
+    const view = doc.getElementById('view');
+    if (view) { view.classList.remove('enter'); void view.offsetWidth; view.classList.add('enter'); }
     try { root.scrollTo(0, 0); } catch (e) { /* ignore */ }
   }
 
